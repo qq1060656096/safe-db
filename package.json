@@ -1,0 +1,49 @@
+{
+  "name": "safe-db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Navicat-like database management tool with permission modes (readonly / approval / full)",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "rebuild": "electron-rebuild -f -o better-sqlite3",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "test:classify": "node scripts/test-classify.mjs"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/lang-sql": "^6.8.0",
+    "@vicons/antd": "^0.13.0",
+    "better-sqlite3": "^12.2.0",
+    "codemirror": "^6.0.1",
+    "dayjs": "^1.11.13",
+    "mysql2": "^3.12.0",
+    "naive-ui": "^2.44.1",
+    "pg": "^8.13.1",
+    "pinia": "^3.0.3",
+    "ssh2": "^1.17.0",
+    "vue": "^3.5.41",
+    "vue-i18n": "^11.1.12",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.1",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@types/ssh2": "^1.15.5",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "electron": "^33.2.1",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.2.10"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.21.5": true,
+    "better-sqlite3@12.11.1": true
+  }
+}

@@ -1,0 +1,282 @@
+import { app, safeStorage } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { ConnectionConfig, ConnectionImportResult, ConnectionMeta, DbType, PermissionMode, SshConfig } from '../../shared/types'
+
+type UnknownRecord = Record<string, unknown>
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function textValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function portValue(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback
+}
+
+/**
+ * 连接配置持久化:userData/connections.json
+ * 密码用 Electron safeStorage(macOS Keychain / Windows DPAPI)加密后 base64 存储。
+ */
+export class ConnectionStore {
+  private file: string
+  private connections: ConnectionConfig[] = []
+
+  constructor() {
+    const dir = app.getPath('userData')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    this.file = join(dir, 'connections.json')
+    this.load()
+  }
+
+  private load(): void {
+    if (!existsSync(this.file)) {
+      this.connections = []
+      return
+    }
+    try {
+      this.connections = JSON.parse(readFileSync(this.file, 'utf-8')) as ConnectionConfig[]
+    } catch {
+      this.connections = []
+    }
+  }
+
+  private persist(): void {
+    writeFileSync(this.file, JSON.stringify(this.connections, null, 2), 'utf-8')
+  }
+
+  private encrypt(plain: string): string {
+    if (!plain) return ''
+    if (safeStorage.isEncryptionAvailable()) {
+      return 'enc:' + safeStorage.encryptString(plain).toString('base64')
+    }
+    // 极少数平台无系统加密,退回明文并标记(避免误判为已加密)
+    return 'plain:' + plain
+  }
+
+  private decrypt(stored: string): string {
+    if (!stored) return ''
+    if (stored.startsWith('enc:')) {
+      try {
+        return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'))
+      } catch {
+        return ''
+      }
+    }
+    if (stored.startsWith('plain:')) return stored.slice(6)
+    // 历史数据无前缀,按明文处理
+    return stored
+  }
+
+  /** 新值非空则加密;为空(编辑留空)则保留已存值 */
+  private resolveSecret(incoming: string | undefined, stored: string | undefined): string {
+    if (incoming) return this.encrypt(incoming)
+    return stored ?? ''
+  }
+
+  /** 脱敏后的列表项:去掉 DB 密码与 SSH 的密码/私钥口令 */
+  private toMeta(c: ConnectionConfig): ConnectionMeta {
+    const { password: _pw, ssh, ...rest } = c
+    const meta: ConnectionMeta = { ...rest }
+    if (ssh) {
+      const { password: _sp, passphrase: _spp, ...sshMeta } = ssh
+      meta.ssh = sshMeta
+    }
+    return meta
+  }
+
+  list(): ConnectionMeta[] {
+    return this.connections.map((c) => this.toMeta(c))
+  }
+
+  /**
+   * 导入由 safe-db 导出的脱敏配置，也兼容直接以连接数组为根节点的 JSON。
+   * 所有密码字段都被主动忽略，避免把不可信文件中的明文密钥写入系统凭据存储。
+   */
+  importPortable(value: unknown): Pick<ConnectionImportResult, 'imported' | 'skipped'> & { connectionIdMap: Map<string, string> } {
+    const source = Array.isArray(value)
+      ? value
+      : isRecord(value) && Array.isArray(value.connections)
+        ? value.connections
+        : null
+    if (!source) throw new Error('连接文件格式无效')
+
+    const existingById = new Map(this.connections.map((connection) => [connection.id, connection]))
+    const existingBySignature = new Map(this.connections.map((connection) => [this.connectionSignature(connection), connection]))
+    const connectionIdMap = new Map<string, string>()
+    let imported = 0
+    let skipped = 0
+
+    for (const item of source) {
+      const connection = this.normalizeImportedConnection(item)
+      if (!connection) {
+        skipped += 1
+        continue
+      }
+      const sourceId = isRecord(item) ? textValue(item.id) : undefined
+      const signature = this.connectionSignature(connection)
+      const sameId = existingById.get(connection.id)
+      if (sameId) {
+        if (this.connectionSignature(sameId) === signature && sourceId) connectionIdMap.set(sourceId, sameId.id)
+        skipped += 1
+        continue
+      }
+      const sameSignature = existingBySignature.get(signature)
+      if (sameSignature) {
+        if (sourceId) connectionIdMap.set(sourceId, sameSignature.id)
+        skipped += 1
+        continue
+      }
+      this.connections.push(connection)
+      existingById.set(connection.id, connection)
+      existingBySignature.set(signature, connection)
+      connectionIdMap.set(sourceId ?? connection.id, connection.id)
+      imported += 1
+    }
+
+    if (imported) this.persist()
+    return { imported, skipped, connectionIdMap }
+  }
+
+  private connectionSignature(connection: ConnectionConfig): string {
+    return JSON.stringify([
+      connection.type,
+      connection.name,
+      connection.host ?? '',
+      connection.port ?? '',
+      connection.user ?? '',
+      connection.database ?? '',
+      connection.filePath ?? ''
+    ])
+  }
+
+  private normalizeImportedConnection(value: unknown): ConnectionConfig | null {
+    if (!isRecord(value)) return null
+    const type: DbType | undefined = value.type === 'mysql' || value.type === 'postgres' || value.type === 'sqlite' ? value.type : undefined
+    const name = textValue(value.name)
+    if (!type || !name) return null
+
+    const permissionMode: PermissionMode = value.permissionMode === 'approval' || value.permissionMode === 'full'
+      ? value.permissionMode
+      : 'readonly'
+    const permissionModeLocked = value.permissionModeLocked === true
+    const id = textValue(value.id) ?? randomUUID()
+    const color = textValue(value.color)
+
+    if (type === 'sqlite') {
+      const filePath = textValue(value.filePath)
+      if (!filePath) return null
+      return { id, name, type, permissionMode, permissionModeLocked, color, filePath, password: '' }
+    }
+
+    const defaultPort = type === 'mysql' ? 3306 : 5432
+    const ssh = this.normalizeImportedSsh(value.ssh)
+    return {
+      id,
+      name,
+      type,
+      permissionMode,
+      permissionModeLocked,
+      color,
+      host: textValue(value.host) ?? '127.0.0.1',
+      port: portValue(value.port, defaultPort),
+      user: textValue(value.user) ?? (type === 'mysql' ? 'root' : 'postgres'),
+      password: '',
+      database: textValue(value.database),
+      ssh
+    }
+  }
+
+  private normalizeImportedSsh(value: unknown): SshConfig | undefined {
+    if (!isRecord(value) || value.enabled !== true) return undefined
+    const host = textValue(value.host)
+    const user = textValue(value.user)
+    if (!host || !user) return undefined
+    const authType = value.authType === 'privateKey' ? 'privateKey' : 'password'
+    return {
+      enabled: true,
+      host,
+      port: portValue(value.port, 22),
+      user,
+      authType,
+      privateKeyPath: authType === 'privateKey' ? textValue(value.privateKeyPath) : undefined,
+      password: '',
+      passphrase: ''
+    }
+  }
+
+  get(id: string): ConnectionConfig | undefined {
+    const c = this.connections.find((x) => x.id === id)
+    if (!c) return undefined
+    return {
+      ...c,
+      password: this.decrypt(c.password ?? ''),
+      ssh: c.ssh
+        ? {
+            ...c.ssh,
+            password: this.decrypt(c.ssh.password ?? ''),
+            passphrase: this.decrypt(c.ssh.passphrase ?? '')
+          }
+        : undefined
+    }
+  }
+
+  /**
+   * 保存连接。编辑已有连接且 password 为空字符串时,保留原密码;
+   * SSH 的密码 / 私钥口令同理。
+   */
+  save(cfg: ConnectionConfig): ConnectionMeta {
+    const existing = this.connections.find((x) => x.id === cfg.id)
+    const permissionModeLocked = cfg.permissionModeLocked ?? existing?.permissionModeLocked ?? false
+    const permissionMode = existing?.permissionModeLocked && permissionModeLocked
+      ? existing.permissionMode
+      : cfg.permissionMode
+    const record: ConnectionConfig = {
+      ...cfg,
+      id: cfg.id || randomUUID(),
+      permissionMode,
+      permissionModeLocked,
+      password: this.resolveSecret(cfg.password, existing?.password),
+      ssh: cfg.ssh
+        ? {
+            ...cfg.ssh,
+            password: this.resolveSecret(cfg.ssh.password, existing?.ssh?.password),
+            passphrase: this.resolveSecret(cfg.ssh.passphrase, existing?.ssh?.passphrase)
+          }
+        : undefined
+    }
+    if (existing) {
+      Object.assign(existing, record)
+    } else {
+      this.connections.push(record)
+    }
+    this.persist()
+    return this.toMeta(record)
+  }
+
+  /** 测试连接时合并已存密码与 SSH 密钥(编辑场景下留空) */
+  mergePasswordForTest(cfg: ConnectionConfig): ConnectionConfig {
+    const existing = cfg.id ? this.connections.find((x) => x.id === cfg.id) : undefined
+    if (!existing) return cfg
+    return {
+      ...cfg,
+      password: cfg.password || this.decrypt(existing.password ?? ''),
+      ssh: cfg.ssh
+        ? {
+            ...cfg.ssh,
+            password: cfg.ssh.password || this.decrypt(existing.ssh?.password ?? ''),
+            passphrase: cfg.ssh.passphrase || this.decrypt(existing.ssh?.passphrase ?? '')
+          }
+        : undefined
+    }
+  }
+
+  delete(id: string): void {
+    this.connections = this.connections.filter((x) => x.id !== id)
+    this.persist()
+  }
+}

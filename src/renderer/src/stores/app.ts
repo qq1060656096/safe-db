@@ -1,0 +1,184 @@
+import { defineStore } from 'pinia'
+import type { ConnectionConfig, ConnectionMeta, ExecuteResponse, PermissionMode, SavedQuery, SavedQueryInput, SqlKind, TableDataQuery, TableDataResult } from '../../../shared/types'
+import { i18n } from '../i18n'
+
+export type TabType = 'query' | 'table' | 'structure' | 'audit'
+
+export interface AppTab {
+  id: string
+  type: TabType
+  title: string
+  connectionId?: string
+  database?: string
+  schema?: string
+  table?: string
+  routine?: string
+  routineType?: 'function' | 'procedure'
+  routineArguments?: string
+  sql?: string
+  savedQueryId?: string
+}
+
+export interface PendingApproval {
+  token: string
+  sql: string
+  sqlKind: SqlKind
+  connectionName: string
+  database?: string
+}
+
+let approvalResolver: ((response: ExecuteResponse) => void) | null = null
+
+export const useAppStore = defineStore('app', {
+  state: () => ({
+    connections: [] as ConnectionMeta[],
+    connectedIds: {} as Record<string, boolean>,
+    tabs: [] as AppTab[],
+    savedQueries: [] as SavedQuery[],
+    activeTabId: null as string | null,
+    pendingApproval: null as PendingApproval | null
+  }),
+  actions: {
+    async loadConnections(): Promise<void> {
+      this.connections = await window.api.listConnections()
+    },
+    async loadSavedQueries(): Promise<void> {
+      this.savedQueries = await window.api.listSavedQueries()
+    },
+    async saveQuery(input: SavedQueryInput): Promise<SavedQuery> {
+      const saved = await window.api.saveQuery(input)
+      const index = this.savedQueries.findIndex((query) => query.id === saved.id)
+      if (index >= 0) this.savedQueries[index] = saved
+      else this.savedQueries.push(saved)
+      return saved
+    },
+    async deleteSavedQuery(id: string): Promise<void> {
+      await window.api.deleteSavedQuery(id)
+      this.savedQueries = this.savedQueries.filter((query) => query.id !== id)
+      for (const tab of this.tabs) if (tab.savedQueryId === id) tab.savedQueryId = undefined
+    },
+    async saveConnection(config: ConnectionConfig): Promise<void> {
+      await window.api.saveConnection(config)
+      await this.loadConnections()
+    },
+    async updateConnectionPermissionMode(id: string, permissionMode: PermissionMode): Promise<ConnectionMeta | undefined> {
+      const connection = this.connections.find((item) => item.id === id)
+      if (!connection || connection.permissionModeLocked || connection.permissionMode === permissionMode) return connection
+      const saved = await window.api.saveConnection({ ...connection, permissionMode })
+      const index = this.connections.findIndex((item) => item.id === id)
+      if (index >= 0) this.connections[index] = saved
+      return saved
+    },
+    async removeConnection(id: string): Promise<void> {
+      await window.api.deleteConnection(id)
+      const activeBelongsToConnection = this.tabs.find((tab) => tab.id === this.activeTabId)?.connectionId === id
+      this.tabs = this.tabs.filter((tab) => tab.connectionId !== id)
+      if (activeBelongsToConnection) this.activeTabId = this.tabs.at(-1)?.id ?? null
+      delete this.connectedIds[id]
+      this.savedQueries = this.savedQueries.filter((query) => query.connectionId !== id)
+      await this.loadConnections()
+    },
+    setConnected(id: string, connected: boolean): void {
+      this.connectedIds[id] = connected
+    },
+    openTab(tab: Omit<AppTab, 'id'>): string {
+      const id = crypto.randomUUID()
+      this.tabs.push({ ...tab, id })
+      this.activeTabId = id
+      return id
+    },
+    closeTab(id: string): void {
+      const index = this.tabs.findIndex((tab) => tab.id === id)
+      this.tabs = this.tabs.filter((tab) => tab.id !== id)
+      if (this.activeTabId === id) this.activeTabId = this.tabs[Math.max(0, index - 1)]?.id ?? null
+    },
+    closeTabs(ids: string[]): void {
+      const removing = new Set(ids)
+      if (removing.size === 0) return
+      const activeIndex = this.tabs.findIndex((tab) => tab.id === this.activeTabId)
+      const activeRemoved = this.activeTabId !== null && removing.has(this.activeTabId)
+      this.tabs = this.tabs.filter((tab) => !removing.has(tab.id))
+      if (activeRemoved) this.activeTabId = this.tabs[Math.min(Math.max(0, activeIndex), this.tabs.length - 1)]?.id ?? null
+    },
+    closeTabsLeft(id: string): void {
+      const index = this.tabs.findIndex((tab) => tab.id === id)
+      if (index > 0) this.closeTabs(this.tabs.slice(0, index).map((tab) => tab.id))
+    },
+    closeTabsRight(id: string): void {
+      const index = this.tabs.findIndex((tab) => tab.id === id)
+      if (index >= 0) this.closeTabs(this.tabs.slice(index + 1).map((tab) => tab.id))
+    },
+    closeOtherTabs(id: string): void {
+      if (!this.tabs.some((tab) => tab.id === id)) return
+      this.closeTabs(this.tabs.filter((tab) => tab.id !== id).map((tab) => tab.id))
+      this.activeTabId = id
+    },
+    closeAllTabs(): void {
+      this.tabs = []
+      this.activeTabId = null
+    },
+    setActiveTab(id: string): void {
+      if (this.tabs.some((tab) => tab.id === id)) this.activeTabId = id
+    },
+    setTabDatabase(id: string, database?: string): void {
+      const tab = this.tabs.find((item) => item.id === id)
+      if (!tab || tab.type !== 'query') return
+      tab.database = database
+      tab.schema = undefined
+      tab.routine = undefined
+      tab.routineType = undefined
+      tab.routineArguments = undefined
+    },
+    bindSavedQuery(id: string, query: SavedQuery): void {
+      const tab = this.tabs.find((item) => item.id === id)
+      if (!tab || tab.type !== 'query') return
+      tab.title = query.name
+      tab.savedQueryId = query.id
+      tab.database = query.database
+      tab.sql = query.sql
+      tab.schema = undefined
+      tab.routine = undefined
+      tab.routineType = undefined
+      tab.routineArguments = undefined
+    },
+    async executeWithApproval(connectionId: string, sql: string, database?: string): Promise<ExecuteResponse> {
+      const response = await window.api.executeSql(connectionId, sql, database)
+      if (response.status !== 'needsApproval') return response
+      const connectionName = this.connections.find((connection) => connection.id === connectionId)?.name ?? ''
+      return new Promise<ExecuteResponse>((resolve) => {
+        approvalResolver = resolve
+        this.pendingApproval = {
+          token: response.approvalToken!,
+          sql,
+          sqlKind: response.sqlKind ?? 'WRITE',
+          connectionName,
+          database
+        }
+      })
+    },
+    async resolveApproval(accept: boolean): Promise<void> {
+      const pending = this.pendingApproval
+      this.pendingApproval = null
+      if (!pending) {
+        approvalResolver = null
+        return
+      }
+      if (accept) {
+        approvalResolver?.(await window.api.confirmExecute(pending.token))
+      } else {
+        await window.api.rejectExecute(pending.token)
+        approvalResolver?.({ status: 'error', error: i18n.global.t('query.canceled') })
+      }
+      approvalResolver = null
+    },
+    getTableData(connectionId: string, query: TableDataQuery): Promise<TableDataResult> {
+      // Vue 会把数组与对象包装成 Proxy；IPC 的结构化克隆不能直接传递 Proxy。
+      const payload: TableDataQuery = {
+        ...query,
+        orderBy: query.orderBy?.map((item) => ({ ...item })),
+        filters: query.filters?.map((item) => ({ ...item }))
+      }
+      return window.api.getTableData(connectionId, payload)
+    }
+  }
+})
