@@ -28,10 +28,11 @@ export default {
     english: 'English'
   },
   app: {
-    name: 'safe-db',
+    name: 'safe db',
     emptyHint: '在左侧双击表打开数据，或右键连接“新建查询”',
     missingApi: '渲染进程未检测到 window.api，请在 Electron 环境中运行。',
-    menu: '菜单'
+    menu: '菜单',
+    newWindow: '新建窗口（Cmd/Ctrl+Shift+N）'
   },
   layout: {
     showLeft: '展开左侧栏',

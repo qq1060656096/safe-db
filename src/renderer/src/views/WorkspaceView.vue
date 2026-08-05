@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { NButton, NDropdown, NEmpty, NTabPane, NTabs, useMessage, type DropdownOption } from 'naive-ui'
+import { SwitcherOutlined } from '@vicons/antd'
+import { NButton, NDropdown, NEmpty, NIcon, NTabPane, NTabs, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import ApprovalModal from '../components/ApprovalModal.vue'
@@ -35,6 +36,7 @@ const MAX_RIGHT_WIDTH = 720
 const leftWidth = ref(readPanelWidth(LEFT_WIDTH_KEY, window.innerWidth <= 1000 ? 250 : 300, MIN_LEFT_WIDTH, MAX_LEFT_WIDTH))
 const rightWidth = ref(readPanelWidth(RIGHT_WIDTH_KEY, window.innerWidth <= 1000 ? 220 : 280, MIN_RIGHT_WIDTH, MAX_RIGHT_WIDTH))
 const resizingSide = ref<'left' | 'right' | null>(null)
+let stopDataChangedListener: (() => void) | null = null
 const hasApi = computed(() => typeof window.api !== 'undefined')
 const activeTitle = computed(() => store.tabs.find((tab) => tab.id === store.activeTabId)?.title ?? t('app.name'))
 const panelStyle = computed<Record<string, string>>(() => ({
@@ -130,10 +132,18 @@ onMounted(async () => {
   normalizePanelWidths()
   window.addEventListener('resize', normalizePanelWidths)
   if (!hasApi.value) return
+  stopDataChangedListener = window.api.onDataChanged((resource) => {
+    const loads: Promise<void>[] = []
+    if (resource === 'connections' || resource === 'all') loads.push(store.loadConnections())
+    if (resource === 'queries' || resource === 'all') loads.push(store.loadSavedQueries())
+    void Promise.all(loads).catch((error) => message.error(error instanceof Error ? error.message : String(error)))
+  })
   try { await Promise.all([store.loadConnections(), store.loadSavedQueries()]) }
   catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
 })
 onBeforeUnmount(() => {
+  stopDataChangedListener?.()
+  stopDataChangedListener = null
   stopResize()
   window.removeEventListener('resize', normalizePanelWidths)
 })
@@ -164,6 +174,7 @@ function selectTabMenu(action: string | number): void {
   else if (action === 'all') store.closeAllTabs()
 }
 function openAudit(): void { store.openTab({ type: 'audit', title: t('sidebar.auditLog') }) }
+function openNewWindow(): void { void window.api.openNewWindow() }
 function isCompactLayout(): boolean { return window.matchMedia('(max-width: 760px)').matches }
 function toggleLeft(): void {
   if (isCompactLayout()) {
@@ -226,6 +237,9 @@ function closeOverlayPanels(): void {
           <template #icon><PanelToggleIcon side="left" /></template>
         </NButton>
         <span class="layout-title">{{ activeTitle }}</span>
+        <NButton quaternary size="small" :title="t('app.newWindow')" :aria-label="t('app.newWindow')" @click="openNewWindow">
+          <template #icon><NIcon><SwitcherOutlined /></NIcon></template>
+        </NButton>
         <NButton quaternary size="small" :title="t(rightCollapsed ? 'layout.showRight' : 'layout.hideRight')" :aria-label="t(rightCollapsed ? 'layout.showRight' : 'layout.hideRight')" @click="toggleRight">
           <template #icon><PanelToggleIcon side="right" /></template>
         </NButton>

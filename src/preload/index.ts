@@ -9,6 +9,14 @@ import type {
 } from '../shared/types'
 
 const api: Api = {
+  // 窗口
+  openNewWindow: () => ipcRenderer.invoke('window:new'),
+  onDataChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, resource: 'connections' | 'queries' | 'all') => listener(resource)
+    ipcRenderer.on('data:changed', handler)
+    return () => ipcRenderer.removeListener('data:changed', handler)
+  },
+
   // 连接管理
   listConnections: () => ipcRenderer.invoke('connections:list'),
   saveConnection: (cfg: ConnectionConfig) => ipcRenderer.invoke('connections:save', cfg),

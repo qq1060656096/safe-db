@@ -1,4 +1,4 @@
-import { dialog, ipcMain, type BrowserWindow } from 'electron'
+import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import type {
   AuditFilter,
@@ -22,29 +22,58 @@ export interface IpcDeps {
   executor: Executor
 }
 
-export function registerIpcHandlers(deps: IpcDeps, getWindow: () => BrowserWindow | null): void {
+export function registerIpcHandlers(
+  deps: IpcDeps,
+  createWindow: (sourceWindow?: BrowserWindow) => BrowserWindow
+): void {
   const { connections, queries, audit, drivers, executor } = deps
+
+  function senderWindow(event: IpcMainInvokeEvent): BrowserWindow | undefined {
+    return BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined
+  }
+
+  function notifyOtherWindows(event: IpcMainInvokeEvent, resource: 'connections' | 'queries' | 'all'): void {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.webContents.id !== event.sender.id && !window.webContents.isDestroyed()) {
+        window.webContents.send('data:changed', resource)
+      }
+    }
+  }
+
+  // ---- 窗口 ----
+  ipcMain.handle('window:new', (event) => {
+    createWindow(senderWindow(event))
+  })
 
   // ---- 连接管理 ----
   ipcMain.handle('connections:list', () => connections.list())
 
-  ipcMain.handle('connections:save', async (_e, cfg: ConnectionConfig) => {
+  ipcMain.handle('connections:save', async (event, cfg: ConnectionConfig) => {
     const meta = connections.save(cfg)
     // 配置可能已变化,重建驱动
     await drivers.invalidate(meta.id)
+    notifyOtherWindows(event, 'connections')
     return meta
   })
 
-  ipcMain.handle('connections:delete', async (_e, id: string) => {
+  ipcMain.handle('connections:delete', async (event, id: string) => {
     await drivers.invalidate(id)
     connections.delete(id)
     queries.deleteByConnection(id)
+    notifyOtherWindows(event, 'all')
   })
 
   // ---- 保存的查询 ----
   ipcMain.handle('queries:list', () => queries.list())
-  ipcMain.handle('queries:save', (_e, query: SavedQueryInput) => queries.save(query))
-  ipcMain.handle('queries:delete', (_e, id: string) => queries.delete(id))
+  ipcMain.handle('queries:save', (event, query: SavedQueryInput) => {
+    const saved = queries.save(query)
+    notifyOtherWindows(event, 'queries')
+    return saved
+  })
+  ipcMain.handle('queries:delete', (event, id: string) => {
+    queries.delete(id)
+    notifyOtherWindows(event, 'queries')
+  })
 
   ipcMain.handle('connections:test', async (_e, cfg: ConnectionConfig) => {
     let tunnel: TunnelHandle | null = null
@@ -66,8 +95,8 @@ export function registerIpcHandlers(deps: IpcDeps, getWindow: () => BrowserWindo
     }
   })
 
-  ipcMain.handle('connections:export', async () => {
-    const win = getWindow()
+  ipcMain.handle('connections:export', async (event) => {
+    const win = senderWindow(event)
     if (!win) return null
     const date = new Date().toISOString().slice(0, 10)
     const res = await dialog.showSaveDialog(win, {
@@ -90,8 +119,8 @@ export function registerIpcHandlers(deps: IpcDeps, getWindow: () => BrowserWindo
     return res.filePath
   })
 
-  ipcMain.handle('connections:import', async () => {
-    const win = getWindow()
+  ipcMain.handle('connections:import', async (event) => {
+    const win = senderWindow(event)
     if (!win) return { imported: 0, skipped: 0, queriesImported: 0, queriesSkipped: 0, canceled: true }
     const res = await dialog.showOpenDialog(win, {
       title: '导入连接',
@@ -103,11 +132,12 @@ export function registerIpcHandlers(deps: IpcDeps, getWindow: () => BrowserWindo
     const value = JSON.parse(raw) as unknown
     const { connectionIdMap, ...connectionResult } = connections.importPortable(value)
     const queryResult = queries.importPortable(value, connectionIdMap)
+    if (connectionResult.imported > 0 || queryResult.queriesImported > 0) notifyOtherWindows(event, 'all')
     return { ...connectionResult, ...queryResult, canceled: false }
   })
 
-  ipcMain.handle('connections:pickSqliteFile', async () => {
-    const win = getWindow()
+  ipcMain.handle('connections:pickSqliteFile', async (event) => {
+    const win = senderWindow(event)
     if (!win) return null
     const res = await dialog.showOpenDialog(win, {
       title: '选择 SQLite 数据库文件',
@@ -122,8 +152,8 @@ export function registerIpcHandlers(deps: IpcDeps, getWindow: () => BrowserWindo
 
   ipcMain.handle(
     'connections:pickFile',
-    async (_e, opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => {
-      const win = getWindow()
+    async (event, opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => {
+      const win = senderWindow(event)
       if (!win) return null
       const res = await dialog.showOpenDialog(win, {
         title: opts?.title ?? '选择文件',
@@ -197,8 +227,8 @@ export function registerIpcHandlers(deps: IpcDeps, getWindow: () => BrowserWindo
   ipcMain.handle('audit:query', (_e, filter: AuditFilter) => audit.query(filter))
 
   // ---- 导出:保存对话框 + 写盘 ----
-  ipcMain.handle('export:save', async (_e, opts: ExportOptions) => {
-    const win = getWindow()
+  ipcMain.handle('export:save', async (event, opts: ExportOptions) => {
+    const win = senderWindow(event)
     if (!win) return null
     const res = await dialog.showSaveDialog(win, {
       title: '导出数据',

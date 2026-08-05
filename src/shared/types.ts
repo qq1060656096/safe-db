@@ -196,6 +196,11 @@ export interface TableDataResult {
 
 /** preload 暴露给渲染进程的 API 形状(见 src/preload/index.ts) */
 export interface Api {
+  // 窗口
+  openNewWindow(): Promise<void>
+  /** 其他窗口修改共享数据时通知当前窗口刷新；返回取消监听函数。 */
+  onDataChanged(listener: (resource: 'connections' | 'queries' | 'all') => void): () => void
+
   // 连接管理
   listConnections(): Promise<ConnectionMeta[]>
   saveConnection(cfg: ConnectionConfig): Promise<ConnectionMeta>

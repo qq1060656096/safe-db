@@ -41,9 +41,21 @@ export const useAppStore = defineStore('app', {
   actions: {
     async loadConnections(): Promise<void> {
       this.connections = await window.api.listConnections()
+      const connectionIds = new Set(this.connections.map((connection) => connection.id))
+      this.tabs = this.tabs.filter((tab) => !tab.connectionId || connectionIds.has(tab.connectionId))
+      if (this.activeTabId && !this.tabs.some((tab) => tab.id === this.activeTabId)) {
+        this.activeTabId = this.tabs.at(-1)?.id ?? null
+      }
+      for (const id of Object.keys(this.connectedIds)) {
+        if (!connectionIds.has(id)) delete this.connectedIds[id]
+      }
     },
     async loadSavedQueries(): Promise<void> {
       this.savedQueries = await window.api.listSavedQueries()
+      const queryIds = new Set(this.savedQueries.map((query) => query.id))
+      for (const tab of this.tabs) {
+        if (tab.savedQueryId && !queryIds.has(tab.savedQueryId)) tab.savedQueryId = undefined
+      }
     },
     async saveQuery(input: SavedQueryInput): Promise<SavedQuery> {
       const saved = await window.api.saveQuery(input)
