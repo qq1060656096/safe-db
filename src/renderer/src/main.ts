@@ -9,6 +9,7 @@ import './styles/index.css'
 const app = createApp(App)
 const pinia = createPinia()
 app.use(pinia).use(router).use(i18n).mount('#app')
+document.documentElement.lang = i18n.global.locale.value
 
 if (import.meta.env.DEV) {
   const store = useAppStore(pinia)

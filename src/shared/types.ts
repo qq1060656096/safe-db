@@ -206,9 +206,9 @@ export interface Api {
   saveConnection(cfg: ConnectionConfig): Promise<ConnectionMeta>
   deleteConnection(id: string): Promise<void>
   testConnection(cfg: ConnectionConfig): Promise<{ ok: boolean; error?: string }>
-  /** 导出脱敏后的连接配置及其保存的查询；不会包含数据库或 SSH 密码 */
+  /** 导出完整连接配置及查询；密码保持为 Electron safeStorage 密文。 */
   exportConnections(): Promise<string | null>
-  /** 导入连接配置及其保存的查询；密码字段会被忽略 */
+  /** 导入连接配置；仅恢复当前系统账户能够解密的 safeStorage 密码。 */
   importConnections(): Promise<ConnectionImportResult>
   pickSqliteFile(): Promise<string | null>
   /** 通用文件选择(如 SSH 私钥) */

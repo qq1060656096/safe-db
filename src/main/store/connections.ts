@@ -54,8 +54,7 @@ export class ConnectionStore {
     if (safeStorage.isEncryptionAvailable()) {
       return 'enc:' + safeStorage.encryptString(plain).toString('base64')
     }
-    // 极少数平台无系统加密,退回明文并标记(避免误判为已加密)
-    return 'plain:' + plain
+    throw new Error('系统安全存储不可用，无法安全保存密码')
   }
 
   private decrypt(stored: string): string {
@@ -93,11 +92,28 @@ export class ConnectionStore {
     return this.connections.map((c) => this.toMeta(c))
   }
 
+  /** 仅供导出使用：返回完整连接信息，凭据保持为 safeStorage 密文。 */
+  listEncrypted(): ConnectionConfig[] {
+    return this.connections.map((connection) => ({
+      ...connection,
+      ssh: connection.ssh ? { ...connection.ssh } : undefined
+    }))
+  }
+
+  /** 只接受当前系统账户能够解密的 safeStorage 密文，绝不从导入文件接收明文凭据。 */
+  private importedEncryptedSecret(value: unknown): string {
+    if (typeof value !== 'string' || !value.startsWith('enc:')) return ''
+    return this.decrypt(value) ? value : ''
+  }
+
   /**
-   * 导入由 safe-db 导出的脱敏配置，也兼容直接以连接数组为根节点的 JSON。
-   * 所有密码字段都被主动忽略，避免把不可信文件中的明文密钥写入系统凭据存储。
+   * 导入 safe db 连接配置，也兼容直接以连接数组为根节点的旧版 JSON。
+   * 只有当前系统账户能够解密的 safeStorage 密文才会恢复；明文密码始终被忽略。
    */
-  importPortable(value: unknown): Pick<ConnectionImportResult, 'imported' | 'skipped'> & { connectionIdMap: Map<string, string> } {
+  importPortable(
+    value: unknown,
+    includeEncryptedSecrets = false
+  ): Pick<ConnectionImportResult, 'imported' | 'skipped'> & { connectionIdMap: Map<string, string> } {
     const source = Array.isArray(value)
       ? value
       : isRecord(value) && Array.isArray(value.connections)
@@ -112,7 +128,7 @@ export class ConnectionStore {
     let skipped = 0
 
     for (const item of source) {
-      const connection = this.normalizeImportedConnection(item)
+      const connection = this.normalizeImportedConnection(item, includeEncryptedSecrets)
       if (!connection) {
         skipped += 1
         continue
@@ -154,7 +170,7 @@ export class ConnectionStore {
     ])
   }
 
-  private normalizeImportedConnection(value: unknown): ConnectionConfig | null {
+  private normalizeImportedConnection(value: unknown, includeEncryptedSecrets: boolean): ConnectionConfig | null {
     if (!isRecord(value)) return null
     const type: DbType | undefined = value.type === 'mysql' || value.type === 'postgres' || value.type === 'sqlite' ? value.type : undefined
     const name = textValue(value.name)
@@ -174,7 +190,7 @@ export class ConnectionStore {
     }
 
     const defaultPort = type === 'mysql' ? 3306 : 5432
-    const ssh = this.normalizeImportedSsh(value.ssh)
+    const ssh = this.normalizeImportedSsh(value.ssh, includeEncryptedSecrets)
     return {
       id,
       name,
@@ -185,13 +201,13 @@ export class ConnectionStore {
       host: textValue(value.host) ?? '127.0.0.1',
       port: portValue(value.port, defaultPort),
       user: textValue(value.user) ?? (type === 'mysql' ? 'root' : 'postgres'),
-      password: '',
+      password: includeEncryptedSecrets ? this.importedEncryptedSecret(value.password) : '',
       database: textValue(value.database),
       ssh
     }
   }
 
-  private normalizeImportedSsh(value: unknown): SshConfig | undefined {
+  private normalizeImportedSsh(value: unknown, includeEncryptedSecrets: boolean): SshConfig | undefined {
     if (!isRecord(value) || value.enabled !== true) return undefined
     const host = textValue(value.host)
     const user = textValue(value.user)
@@ -204,8 +220,8 @@ export class ConnectionStore {
       user,
       authType,
       privateKeyPath: authType === 'privateKey' ? textValue(value.privateKeyPath) : undefined,
-      password: '',
-      passphrase: ''
+      password: includeEncryptedSecrets ? this.importedEncryptedSecret(value.password) : '',
+      passphrase: includeEncryptedSecrets ? this.importedEncryptedSecret(value.passphrase) : ''
     }
   }
 

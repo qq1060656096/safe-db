@@ -105,13 +105,14 @@ export function registerIpcHandlers(
       filters: [{ name: 'safe-db 连接配置', extensions: ['json'] }]
     })
     if (res.canceled || !res.filePath) return null
-    const exportedConnections = connections.list()
+    const exportedConnections = connections.listEncrypted()
     const exportedConnectionIds = new Set(exportedConnections.map((connection) => connection.id))
     const payload = {
       format: 'safe-db-connections',
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
-      secretsIncluded: false,
+      secretsIncluded: true,
+      secretProtection: 'electron-safe-storage',
       connections: exportedConnections,
       queries: queries.list().filter((query) => exportedConnectionIds.has(query.connectionId))
     }
@@ -130,7 +131,14 @@ export function registerIpcHandlers(
     if (res.canceled || !res.filePaths[0]) return { imported: 0, skipped: 0, queriesImported: 0, queriesSkipped: 0, canceled: true }
     const raw = await readFile(res.filePaths[0], 'utf-8')
     const value = JSON.parse(raw) as unknown
-    const { connectionIdMap, ...connectionResult } = connections.importPortable(value)
+    const record = typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null
+    const includesEncryptedSecrets = record?.format === 'safe-db-connections'
+      && record.version === 3
+      && record.secretsIncluded === true
+      && record.secretProtection === 'electron-safe-storage'
+    const { connectionIdMap, ...connectionResult } = connections.importPortable(value, includesEncryptedSecrets)
     const queryResult = queries.importPortable(value, connectionIdMap)
     if (connectionResult.imported > 0 || queryResult.queriesImported > 0) notifyOtherWindows(event, 'all')
     return { ...connectionResult, ...queryResult, canceled: false }

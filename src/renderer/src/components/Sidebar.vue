@@ -4,6 +4,7 @@ import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOu
 import { NButton, NDropdown, NIcon, NInput, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import { isAppLocale, localeOptions } from '../i18n'
 import { useAppStore } from '../stores/app'
 import { useSettingsStore } from '../stores/settings'
 import ConnectionDialog from './ConnectionDialog.vue'
@@ -37,9 +38,11 @@ const contextMenuNode = ref<DbTreeNode | null>(null)
 const permissionChangingId = ref<string | null>(null)
 
 const permissionType: Record<PermissionMode, 'info' | 'warning' | 'success'> = { readonly: 'info', approval: 'warning', full: 'success' }
-const languageOptions = computed<DropdownOption[]>(() => [
-  { key: 'zh-CN', label: t('common.chinese') }, { key: 'en-US', label: t('common.english') }
-])
+const languageOptions = localeOptions.map<DropdownOption>(({ value, label }) => ({ key: value, label }))
+const currentLocaleLabel = computed(() => localeOptions.find(({ value }) => value === settings.locale)?.shortLabel ?? '中')
+function selectLocale(value: string | number): void {
+  if (isAppLocale(value)) settings.setLocale(value)
+}
 const queryConnectionOptions = computed<DropdownOption[]>(() => store.connections.length
   ? store.connections.map((connection) => ({
       key: connection.id,
@@ -586,7 +589,7 @@ function selectContextMenu(key: string | number): void {
     <header class="sidebar-header">
       <span>{{ t('sidebar.connections') }}</span>
       <span class="sidebar-actions">
-        <NDropdown trigger="click" :options="languageOptions" @select="(locale) => settings.setLocale(locale as 'zh-CN' | 'en-US')"><NButton quaternary size="tiny">{{ settings.locale === 'zh-CN' ? '中' : 'EN' }}</NButton></NDropdown>
+        <NDropdown trigger="click" :options="languageOptions" @select="selectLocale"><NButton quaternary size="tiny" :title="t('common.language')">{{ currentLocaleLabel }}</NButton></NDropdown>
         <NButton quaternary size="small" :title="t('sidebar.auditLog')" @click="store.openTab({ type: 'audit', title: t('sidebar.auditLog') })"><template #icon><NIcon><HistoryOutlined /></NIcon></template></NButton>
         <NDropdown trigger="click" :options="queryConnectionOptions" @select="openNewQuery"><NButton quaternary size="small" :title="t('sidebar.newQuery')"><template #icon><NIcon><CodeOutlined /></NIcon></template></NButton></NDropdown>
         <NDropdown trigger="click" :options="connectionTransferOptions" @select="transferConnections"><NButton quaternary size="small" :title="t('sidebar.connectionManagement')"><template #icon><NIcon><MoreOutlined /></NIcon></template></NButton></NDropdown>
