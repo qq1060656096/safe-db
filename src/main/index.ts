@@ -6,6 +6,9 @@ import { registerIpcHandlers } from './ipc'
 import { AuditStore } from './store/audit'
 import { ConnectionStore } from './store/connections'
 import { QueryStore } from './store/queries'
+import { AgentServer } from './agent/server'
+import { AgentService } from './agent/service'
+import type { AgentApprovalRequest } from '../shared/types'
 
 const PRODUCT_NAME = 'safe db'
 
@@ -20,6 +23,15 @@ if (process.env.ELECTRON_RENDERER_URL) {
 
 const windows = new Set<BrowserWindow>()
 let drivers: DriverManager | null = null
+let agentServer: AgentServer | null = null
+let agentService: AgentService | null = null
+
+function sendPendingAgentApprovals(window: BrowserWindow): void {
+  if (!agentService || window.webContents.isDestroyed()) return
+  for (const request of agentService.pendingApprovals()) {
+    window.webContents.send('agent:approvalRequested', request)
+  }
+}
 
 function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
   const sourceBounds = sourceWindow?.getNormalBounds()
@@ -47,6 +59,7 @@ function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
     }
   })
   windows.add(window)
+  window.webContents.on('did-finish-load', () => sendPendingAgentApprovals(window))
 
   // 外链交给系统浏览器
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -63,6 +76,16 @@ function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
 
   window.on('closed', () => windows.delete(window))
   return window
+}
+
+function notifyAgentApproval(request: AgentApprovalRequest): void {
+  const target = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+  if (target && !target.webContents.isDestroyed()) {
+    target.webContents.send('agent:approvalRequested', request)
+    return
+  }
+  // 后台服务收到写操作时打开桌面窗口，确保审批必须由用户完成。
+  createWindow()
 }
 
 function installApplicationMenu(): void {
@@ -117,7 +140,7 @@ if (!gotLock) {
     else void app.whenReady().then(() => createWindow())
   })
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     // app ready 时再设置一次，避免开发模式的 Electron bundle 覆盖名称。
     app.setName(PRODUCT_NAME)
     const connections = new ConnectionStore()
@@ -125,13 +148,16 @@ if (!gotLock) {
     const audit = new AuditStore()
     drivers = new DriverManager((id) => connections.get(id))
     const executor = new Executor(connections, drivers, audit)
+    agentService = new AgentService(connections, drivers, executor, notifyAgentApproval)
+    agentServer = new AgentServer(app.getPath('userData'), agentService)
+    await agentServer.start()
     registerIpcHandlers(
       { connections, queries, audit, drivers, executor },
       (sourceWindow) => createWindow(sourceWindow)
     )
 
     installApplicationMenu()
-    createWindow()
+    if (!process.argv.includes('--agent-headless')) createWindow()
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -146,10 +172,16 @@ if (!gotLock) {
     // 退出前优雅关闭所有数据库连接(MySQL 结束会话、PG 断开 client、SQLite close)。
     // 先摘出引用并置空避免二次触发,disconnectAll 完成后直接 exit。
     const d = drivers
-    if (d) {
+    const server = agentServer
+    if (d || server) {
       drivers = null
+      agentServer = null
+      agentService = null
       e.preventDefault()
-      void d.disconnectAll().finally(() => app.exit(0))
+      void Promise.all([
+        d?.disconnectAll() ?? Promise.resolve(),
+        server?.close() ?? Promise.resolve()
+      ]).finally(() => app.exit(0))
     }
   })
 }

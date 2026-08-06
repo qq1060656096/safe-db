@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   Api,
+  AgentApprovalRequest,
   AuditFilter,
   ConnectionConfig,
   ExportOptions,
@@ -16,10 +17,16 @@ const api: Api = {
     ipcRenderer.on('data:changed', handler)
     return () => ipcRenderer.removeListener('data:changed', handler)
   },
+  onAgentApprovalRequested: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: AgentApprovalRequest) => listener(request)
+    ipcRenderer.on('agent:approvalRequested', handler)
+    return () => ipcRenderer.removeListener('agent:approvalRequested', handler)
+  },
 
   // 连接管理
   listConnections: () => ipcRenderer.invoke('connections:list'),
   saveConnection: (cfg: ConnectionConfig) => ipcRenderer.invoke('connections:save', cfg),
+  duplicateConnection: (id: string, name: string) => ipcRenderer.invoke('connections:duplicate', id, name),
   deleteConnection: (id: string) => ipcRenderer.invoke('connections:delete', id),
   testConnection: (cfg: ConnectionConfig) => ipcRenderer.invoke('connections:test', cfg),
   exportConnections: () => ipcRenderer.invoke('connections:export'),
@@ -27,6 +34,7 @@ const api: Api = {
   pickSqliteFile: () => ipcRenderer.invoke('connections:pickSqliteFile'),
   pickFile: (opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) =>
     ipcRenderer.invoke('connections:pickFile', opts),
+  pickDataFile: () => ipcRenderer.invoke('data:pickImportFile'),
 
   // 保存的查询
   listSavedQueries: () => ipcRenderer.invoke('queries:list'),
@@ -37,7 +45,7 @@ const api: Api = {
   connect: (id: string) => ipcRenderer.invoke('db:connect', id),
   disconnect: (id: string) => ipcRenderer.invoke('db:disconnect', id),
   listDatabases: (id: string) => ipcRenderer.invoke('db:databases', id),
-  listTables: (id: string, database?: string) => ipcRenderer.invoke('db:tables', id, database),
+  listTables: (id: string, database?: string, includeStats?: boolean) => ipcRenderer.invoke('db:tables', id, database, includeStats),
   listRoutines: (id: string, database?: string) => ipcRenderer.invoke('db:routines', id, database),
   listColumns: (id: string, database: string | undefined, table: string, schema?: string) =>
     ipcRenderer.invoke('db:columns', id, database, table, schema),

@@ -59,12 +59,22 @@ export interface ConnectionImportResult {
   canceled: boolean
 }
 
+export interface DataImportFile {
+  name: string
+  content: string
+}
+
 export interface TableInfo {
   name: string
   type: 'table' | 'view'
   /** PG 的 schema;MySQL/SQLite 为空 */
   schema?: string
   comment?: string
+  /** 数据行数；部分数据库返回估算值。 */
+  rowCount?: number
+  createdAt?: string
+  updatedAt?: string
+  objectId?: string | number
 }
 
 export interface RoutineInfo {
@@ -74,6 +84,9 @@ export interface RoutineInfo {
   schema?: string
   /** PostgreSQL 重载函数的参数签名 */
   arguments?: string
+  createdAt?: string
+  updatedAt?: string
+  objectId?: string | number
 }
 
 export interface SavedQuery {
@@ -113,6 +126,21 @@ export interface IndexInfo {
   primary: boolean
 }
 
+export interface ForeignKeyInfo {
+  name: string
+  columns: string[]
+  referencedSchema?: string
+  referencedTable: string
+  referencedColumns: string[]
+  onUpdate?: string
+  onDelete?: string
+}
+
+export interface CheckConstraintInfo {
+  name: string
+  expression: string
+}
+
 export interface QueryResult {
   kind: 'rows' | 'exec'
   columns?: { name: string; dataType?: string }[]
@@ -130,6 +158,18 @@ export interface ExecuteResponse {
   /** needsApproval 时返回,确认执行时凭此一次性 token */
   approvalToken?: string
   durationMs?: number
+}
+
+/** 由 Agent CLI 发起、必须在桌面端人工处理的审批请求。 */
+export interface AgentApprovalRequest {
+  requestId: string
+  approvalToken: string
+  connectionId: string
+  connectionName: string
+  database?: string
+  sql: string
+  sqlKind: SqlKind
+  expiresAt: string
 }
 
 export type ApprovalStatus = 'not_required' | 'approved' | 'rejected'
@@ -200,10 +240,14 @@ export interface Api {
   openNewWindow(): Promise<void>
   /** 其他窗口修改共享数据时通知当前窗口刷新；返回取消监听函数。 */
   onDataChanged(listener: (resource: 'connections' | 'queries' | 'all') => void): () => void
+  /** Agent CLI 发起写操作时通知桌面端显示人工审批。 */
+  onAgentApprovalRequested(listener: (request: AgentApprovalRequest) => void): () => void
 
   // 连接管理
   listConnections(): Promise<ConnectionMeta[]>
   saveConnection(cfg: ConnectionConfig): Promise<ConnectionMeta>
+  /** 复制完整连接配置；凭据在主进程内保持加密，不暴露给渲染进程。 */
+  duplicateConnection(id: string, name: string): Promise<ConnectionMeta>
   deleteConnection(id: string): Promise<void>
   testConnection(cfg: ConnectionConfig): Promise<{ ok: boolean; error?: string }>
   /** 导出完整连接配置及查询；密码保持为 Electron safeStorage 密文。 */
@@ -213,6 +257,8 @@ export interface Api {
   pickSqliteFile(): Promise<string | null>
   /** 通用文件选择(如 SSH 私钥) */
   pickFile(opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null>
+  /** 选择 CSV / JSON 数据文件并读取 UTF-8 文本；取消返回 null。 */
+  pickDataFile(): Promise<DataImportFile | null>
 
   // 保存的查询
   listSavedQueries(): Promise<SavedQuery[]>
@@ -223,7 +269,7 @@ export interface Api {
   connect(id: string): Promise<{ ok: boolean; error?: string }>
   disconnect(id: string): Promise<void>
   listDatabases(id: string): Promise<string[]>
-  listTables(id: string, database?: string): Promise<TableInfo[]>
+  listTables(id: string, database?: string, includeStats?: boolean): Promise<TableInfo[]>
   listRoutines(id: string, database?: string): Promise<RoutineInfo[]>
   listColumns(id: string, database: string | undefined, table: string, schema?: string): Promise<ColumnInfo[]>
   listIndexes(id: string, database: string | undefined, table: string, schema?: string): Promise<IndexInfo[]>

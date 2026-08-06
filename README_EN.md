@@ -1,25 +1,62 @@
-# safe db
+# safe db — a safe database tool for AI agents
 
 [简体中文](README.md) | [English](README_EN.md)
 
-> A desktop database tool designed to combine the efficiency of a database client with safeguards for production operations.
+> Let Codex, Claude Code, and other AI agents understand your database and run SQL—while you keep control of permissions, approvals, and audit history.
 
-**safe db is completely free, and all features are available at no cost.**
+> [!IMPORTANT]
+> **safe db is free forever. Every feature is free to use, with no limits based on connections, queries, or agents.**
 
-safe db is built for developers who frequently inspect, troubleshoot, and maintain databases. It provides a familiar experience for browsing databases, editing SQL, working with data grids, and designing table structures, while allowing every connection to use one of three permission modes: **Read-only, Approval, or Full access**.
+AI agents can already read code, modify projects, and run tests. Database access is still awkward: either hand credentials to the agent or become the human API between the agent and your data.
 
-When connecting to a production database, you no longer have to rely on “I’ll be careful” to protect your data. Write operations can be blocked outright or require confirmation before execution, with searchable operation records stored locally.
+safe db offers a third option. It is both a full desktop database workspace and a local database gateway designed for AI agents. Agents can discover saved connections, inspect schemas, validate SQL, and execute queries through a structured CLI without receiving database passwords. Every operation still passes through safe db's permission, approval, and audit pipeline.
+
+With one tool, you can:
+
+- Browse databases, edit data, and design schemas yourself.
+- Give agents stable JSON context for one table or many tables at once.
+- Block writes with Read-only mode or require a human decision with Approval mode.
+- Keep credentials, saved queries, and audit history on your machine.
+
+## A free alternative to Navicat and TablePlus
+
+If your daily work mainly involves connecting to databases, browsing objects, editing SQL, managing table data, and changing schemas, safe db can be a free alternative to traditional database tools such as Navicat and TablePlus.
+
+safe db is not simply copying a traditional database client. It rethinks database access for the AI-agent era: it covers common developer workflows while allowing Codex, Claude Code, and other agents to inspect schemas, validate SQL, and run queries without receiving database passwords. High-risk operations can still require a human decision.
+
+Rather than claiming every feature found in mature database clients, safe db currently focuses on three things:
+
+- **Practical daily workflows**: Connection management, object browsing, SQL editing, table data management, schema design, and result export.
+- **Direct agent access**: A stable JSON CLI, single and multi-table schema context, SQL execution, and approval waiting.
+- **Boundaries for production work**: Read-only, Approval, and Full-access modes backed by local audit history.
+
+If you depend on advanced data migration, complete backup and restore workflows, ER modeling, or support for many database engines, you may still want to keep an established specialist tool. safe db aims first to become the most natural and secure everyday database gateway for developers and AI agents.
+
+## Let an agent understand your database in a few commands
+
+```bash
+safedb connection list
+safedb database list --connection <connection-id>
+safedb object list --connection <connection-id> --database <database>
+
+safedb table describe --connection <connection-id> --database <database> \
+  --table users --table orders
+
+safedb sql run --connection <connection-id> --database <database> --stdin < query.sql
+```
+
+The CLI writes stable single-line JSON to stdout by default, so Codex, Claude Code, and any other shell-capable agent can call it directly. For terminal use, add `--human` for command-specific tables and summaries, or `--format pretty` for indented JSON. Agents reference connections already saved in safe db; database and SSH credentials are never exposed through the CLI.
 
 ## Why safe db?
 
-Most database clients only ask whether a statement can be executed. safe db also asks whether it should be executed right now.
+Most database clients answer how a person can operate a database. safe db also answers how people and AI agents can safely share database access.
 
-- **Safer by default**: New connections use read-only mode by default, and unknown statements are treated as high risk.
-- **Visible risk**: SQL statements are classified as read, write, DDL, or other operations before execution.
-- **Protection against mistakes**: Approval mode intercepts `INSERT`, `UPDATE`, `DELETE`, and DDL statements until they are confirmed.
-- **Traceable operations**: Successful, failed, blocked, and cancelled operations are all written to a local operation log.
-- **A practical daily workspace**: Includes object browsing, SQL completion, data editing, schema design, result export, saved queries, and multiple windows.
-- **Local first**: Connection settings, saved queries, and operation logs remain on your device without relying on a cloud service.
+- **An agent-native CLI**: Discover connections, databases, objects, DDL, and single or multiple table schemas as machine-readable JSON.
+- **Credentials stay out of prompts**: The CLI uses connections already stored by safe db and never returns database or SSH passwords.
+- **One safety pipeline**: Desktop actions and agent requests share SQL classification, permission checks, approval, execution, and auditing.
+- **Safer by default**: New connections use Read-only mode, and unknown statements are treated as high risk.
+- **Humans keep the final say**: In Approval mode, agent writes must be confirmed in the desktop app.
+- **Local first**: Connections, saved queries, and operation logs remain on your device without a cloud database proxy.
 
 ## Core features
 
@@ -27,6 +64,8 @@ Most database clients only ask whether a statement can be executed. safe db also
 
 | Feature | Capabilities |
 | --- | --- |
+| AI Agent CLI | Connection discovery, object browsing, single/multi-table schemas, DDL, SQL validation and execution, approval waiting |
+| Machine-readable protocol | Stable JSON output, local socket transport, explicit statuses and error codes |
 | Database connections | MySQL, PostgreSQL, and SQLite connections with connection testing |
 | SSH tunnels | MySQL / PostgreSQL jump hosts with password and private-key authentication |
 | Object browser | Browse databases, schemas, tables, views, functions, and stored procedures |
@@ -38,6 +77,26 @@ Most database clients only ask whether a statement can be executed. safe db also
 | Data export | Export query results and table data as CSV / JSON |
 | Multiple languages | Switch the interface language to match your preferences |
 | Workspace experience | Multiple windows and resizable panels |
+
+### Supported operating systems
+
+safe db uses Electron and Node.js. The desktop app and Agent CLI support mainstream desktop operating systems:
+
+| Operating system | Status | Notes |
+| --- | --- | --- |
+| macOS | ✅ Supported | Apple Silicon and Intel; credentials are protected by the system Keychain |
+| Windows | ✅ Supported | Windows 10 / 11; the local agent service uses a Named Pipe |
+| Linux | ✅ Supported | Ubuntu, Debian, Fedora, and similar desktop distributions; credential storage requires an available keyring / Secret Service |
+
+The repository currently provides source-based development and build workflows. Run `npm run rebuild` after installing dependencies to rebuild SQLite for the current Electron runtime.
+
+### Supported databases
+
+| Database | Objects and schemas | SQL execution | SSH tunnel | Agent CLI |
+| --- | --- | --- | --- | --- |
+| MySQL | ✅ | ✅ | ✅ | ✅ |
+| PostgreSQL | ✅ | ✅ | ✅ | ✅ |
+| SQLite | ✅ | ✅ | Not needed | ✅ |
 
 ### Three connection permission modes
 
@@ -64,17 +123,18 @@ Permission modes can also be locked to prevent casual changes while a connection
 
 ### Safe execution pipeline
 
-All changes made through the SQL editor, data grid, and schema designer pass through the same execution pipeline:
+SQL from both developers and AI agents passes through the same execution pipeline:
 
 ```mermaid
 flowchart LR
-    UI["SQL editor / Data grid / Schema designer"] --> IPC["Preload + typed IPC contract"]
-    IPC --> Split["SQL splitting and risk classification"]
+    Human["Developer: editor / data grid / schema designer"] --> Gateway["safe db local service"]
+    Agent["AI agent: safedb CLI"] --> Gateway
+    Gateway --> Split["SQL splitting and risk classification"]
     Split --> Policy{"Connection permission mode"}
     Policy -->|Read-only with writes| Deny["Block and record"]
     Policy -->|Approval with writes| Confirm["One-time token confirmation"]
     Policy -->|Execution allowed| Tx["Transactional execution"]
-    Confirm --> Tx
+    Confirm -->|Human confirmation in desktop app| Tx
     Tx --> Driver["MySQL / PostgreSQL / SQLite driver"]
     Tx --> Audit["Local operation log"]
 ```
@@ -103,6 +163,15 @@ In macOS development mode, `npm run dev` automatically prepares an Electron runt
 4. Double-click a table to view its data, or right-click a connection to create a SQL query.
 5. When writes are needed, switch to Approval mode to retain confirmation protection.
 
+To use the Agent CLI, create a production build once:
+
+```bash
+npm run build
+node scripts/safedb.mjs connection list
+```
+
+When installed as an npm binary, use the `safedb` command directly.
+
 ## Common commands
 
 ```bash
@@ -115,12 +184,54 @@ npm run typecheck
 # SQL risk-classifier tests
 npm run test:classify
 
+# AI Agent CLI service tests
+npm run test:agent
+
+# AI Agent CLI output and localized-help tests
+npm run test:cli
+
 # Create a production build in out/
 npm run build
 
 # Preview the production build
 npm run start
 ```
+
+## AI Agent CLI reference
+
+The CLI only uses connections saved in safe db. SQL is read from stdin or a file so it does not appear in process arguments or shell history:
+
+```bash
+# Discover connections and database objects
+safedb connection list
+safedb database list --connection <connection-id-or-exact-name>
+safedb object list --connection <connection-id> --database <database>
+
+# Describe one or multiple tables; repeat --table for up to 20 distinct tables
+safedb table describe --connection <connection-id> --database <database> --schema <schema> \
+  --table users --table orders
+
+# Validate or execute SQL
+safedb sql check --connection <connection-id> --database <database> --file query.sql
+safedb sql run --connection <connection-id> --database <database> --stdin < query.sql
+
+# Approval-mode writes return a requestId handled by the desktop app
+safedb request get <request-id>
+safedb request wait <request-id> --timeout 60
+
+# Human-readable tables/summaries, or indented JSON
+safedb connection list --human
+safedb table describe --connection <connection-id> --table users --format human
+safedb connection list --format pretty
+
+# Select the help language; SAFE_DB_LANG is also supported
+safedb --help --lang zh-CN
+SAFE_DB_LANG=ja-JP safedb table describe --help
+```
+
+The default `--format json` always writes one JSON object to stdout for compatibility with agents and scripts. `--format pretty` writes the complete indented JSON response. `--format human` (or `--human`) renders command-specific tables, query results, DDL, and approval summaries. In human mode errors go to stderr while other results go to stdout; exit codes remain the same in every mode. Read-only connections block writes, Approval connections open a desktop confirmation window, and Full-access connections retain their configured behavior. If the local service is not running, the CLI attempts to start the built app in headless mode.
+
+CLI help is available in `zh-CN`, `zh-TW`, `en-US`, `ja-JP`, `ko-KR`, `de-DE`, `fr-FR`, `es-ES`, `pt-BR`, and `ru-RU`. The selection order is `--lang`, `SAFE_DB_LANG`, then the system locale; unmatched locales fall back to Simplified Chinese. `--lang` only affects `help` and `--help` text and does not change JSON protocol fields.
 
 The repository's `scripts/` directory also contains end-to-end scripts covering the UI, all three database drivers, permission approval, read-only bypass attempts, and the schema designer. Some scripts require local MySQL / PostgreSQL test instances and use Electron's CDP port in development mode.
 
@@ -129,6 +240,8 @@ Before submitting code, run at least:
 ```bash
 npm run typecheck
 npm run test:classify
+npm run test:agent
+npm run test:cli
 npm run build
 ```
 
@@ -149,6 +262,7 @@ npm run build
 safe-db/
 ├── src/
 │   ├── main/
+│   │   ├── agent/        # Agent CLI protocol, local service, and approval-request lifecycle
 │   │   ├── core/         # SQL splitting, risk classification, permission decisions, unified executor
 │   │   ├── drivers/      # MySQL / PostgreSQL / SQLite drivers
 │   │   ├── ssh/          # SSH tunnel lifecycle
@@ -164,7 +278,7 @@ safe-db/
 ## Data and security notes
 
 - Connection settings are stored in Electron's `userData/connections.json`.
-- Database passwords, SSH passwords, and private-key passphrases are encrypted with Electron `safeStorage` when supported. If system encryption is unavailable, values fall back to storage with an explicit `plain:` marker.
+- Database passwords, SSH passwords, and private-key passphrases are encrypted with Electron `safeStorage`. If system encryption is unavailable, safe db refuses to save them instead of falling back to plaintext.
 - Saved queries are stored in `userData/queries.json`, and operation logs are stored in `userData/audit.db`.
 - Exported connection packages never contain database passwords, SSH passwords, or private-key passphrases. These values must be entered again after import.
 - The renderer enables `contextIsolation` and disables `nodeIntegration`. It accesses main-process capabilities only through the typed preload API.
@@ -179,6 +293,7 @@ This project offers several clear, self-contained areas for contribution:
 
 - **Add a database driver**: Implement the `DbDriver` interface in `src/main/drivers/base.ts` and register it with the driver manager.
 - **Harden the SQL classifier**: Add rules to `src/main/core/sqlClassify.ts` and include tests for adversarial inputs.
+- **Extend the Agent protocol**: Improve machine-readable schema context, result limits, error codes, and additional agent tools.
 - **Improve database dialects**: Enhance table DDL, type mappings, function definitions, or SQL completion.
 - **Improve the workspace**: Refine the data grid, keyboard shortcuts, accessibility, themes, and large-data handling.
 - **Add a language**: Extend translations in `src/renderer/src/locales/` and keep translation keys aligned.
@@ -187,4 +302,4 @@ When submitting changes, keep all database operations going through the unified 
 
 ---
 
-If you want a database client with a dependable safety boundary in addition to efficiency, you are welcome to try safe db, share feedback, and contribute.
+If you use Codex, Claude Code, or your own agent to build software, let safe db become its safe gateway to your databases. The project is free forever, and feedback and contributions are always welcome.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CaretRightOutlined, ClearOutlined, SaveOutlined } from '@vicons/antd'
+import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, SaveOutlined } from '@vicons/antd'
 import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTooltip, useMessage, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, ExecuteResponse, TableInfo } from '../../../shared/types'
@@ -25,19 +25,15 @@ const databaseOptions = ref<SelectOption[]>([])
 const databasesLoading = ref(false)
 const saveDialogOpen = ref(false)
 const savedName = ref('')
-const savedLocation = ref('__connection__')
+const savedConnectionId = ref('')
+const savedDatabase = ref<string | null>(null)
+const saveDatabaseOptions = ref<SelectOption[]>([])
+const saveDatabasesLoading = ref(false)
 const saving = ref(false)
-const CONNECTION_LOCATION = '__connection__'
 const savedQuery = computed(() => store.savedQueries.find((query) => query.id === props.tab.savedQueryId))
-const saveLocationOptions = computed<SelectOption[]>(() => {
-  const names = new Set(databaseOptions.value.map((option) => String(option.value)))
-  if (props.tab.database) names.add(props.tab.database)
-  if (savedQuery.value?.database) names.add(savedQuery.value.database)
-  return [
-    { label: t('query.saveToConnection', { name: connection.value?.name ?? '' }), value: CONNECTION_LOCATION },
-    ...[...names].sort().map((database) => ({ label: t('query.saveToDatabase', { name: database }), value: database }))
-  ]
-})
+const saveConnectionOptions = computed<SelectOption[]>(() => store.connections.map((item) => ({ label: item.name, value: item.id })))
+const saveConnection = computed(() => store.connections.find((item) => item.id === savedConnectionId.value))
+let saveDatabaseRequestId = 0
 const EDITOR_HEIGHT_KEY = 'safe-db.query.editor-height'
 const MIN_EDITOR_HEIGHT = 96
 const MAX_EDITOR_HEIGHT = 640
@@ -263,26 +259,49 @@ function selectDatabase(database: string | null): void {
   store.setTabDatabase(props.tab.id, database ?? undefined)
 }
 
+async function loadSaveDatabases(connectionId: string, keepSelection = false): Promise<void> {
+  const requestId = ++saveDatabaseRequestId
+  saveDatabaseOptions.value = []
+  if (!connectionId) return
+  saveDatabasesLoading.value = true
+  try {
+    const databases = await window.api.listDatabases(connectionId)
+    if (requestId !== saveDatabaseRequestId || savedConnectionId.value !== connectionId) return
+    saveDatabaseOptions.value = databases.map((database) => ({ label: database, value: database }))
+    if (!keepSelection || (savedDatabase.value && !databases.includes(savedDatabase.value))) savedDatabase.value = null
+  } catch (error) {
+    if (requestId !== saveDatabaseRequestId) return
+    message.error(t('query.databasesLoadFailed', { error: error instanceof Error ? error.message : String(error) }))
+    savedDatabase.value = null
+  } finally {
+    if (requestId === saveDatabaseRequestId) saveDatabasesLoading.value = false
+  }
+}
+function selectSaveConnection(connectionId: string): void {
+  savedConnectionId.value = connectionId
+  savedDatabase.value = null
+  void loadSaveDatabases(connectionId)
+}
 function openSaveDialog(): void {
   savedName.value = savedQuery.value?.name ?? t('query.untitledQuery')
-  savedLocation.value = savedQuery.value
-    ? (savedQuery.value.database ?? CONNECTION_LOCATION)
-    : (props.tab.database ?? CONNECTION_LOCATION)
+  savedConnectionId.value = savedQuery.value?.connectionId ?? props.tab.connectionId ?? store.connections[0]?.id ?? ''
+  savedDatabase.value = savedQuery.value?.database ?? props.tab.database ?? null
   saveDialogOpen.value = true
+  void loadSaveDatabases(savedConnectionId.value, true)
 }
 
 async function saveCurrentQuery(): Promise<void> {
   const name = savedName.value.trim()
   if (!name) { message.warning(t('query.queryNameRequired')); return }
   if (!value.value.trim()) { message.warning(t('query.queryContentRequired')); return }
-  if (!props.tab.connectionId) return
+  if (!savedConnectionId.value) { message.warning(t('query.connectionRequired')); return }
   saving.value = true
   try {
     const saved = await store.saveQuery({
       id: props.tab.savedQueryId,
       name,
-      connectionId: props.tab.connectionId,
-      database: savedLocation.value === CONNECTION_LOCATION ? undefined : savedLocation.value,
+      connectionId: savedConnectionId.value,
+      database: savedDatabase.value ?? undefined,
       sql: value.value
     })
     store.bindSavedQuery(props.tab.id, saved)
@@ -370,7 +389,21 @@ async function saveCurrentQuery(): Promise<void> {
         <NInput v-model:value="savedName" maxlength="120" :placeholder="t('query.queryNamePlaceholder')" @keyup.enter="saveCurrentQuery" />
       </NFormItem>
       <NFormItem :label="t('query.saveLocation')" required>
-        <NSelect v-model:value="savedLocation" filterable :options="saveLocationOptions" />
+        <div class="query-save-location">
+          <div class="query-save-selector">
+            <span class="query-save-selector-label">{{ t('query.selectConnection') }}</span>
+            <NSelect filterable :value="savedConnectionId || null" :options="saveConnectionOptions" :placeholder="t('query.selectConnection')" @update:value="(id) => selectSaveConnection(String(id))" />
+          </div>
+          <div class="query-save-selector">
+            <span class="query-save-selector-label">{{ t('query.selectDatabaseForSave') }}</span>
+            <NSelect v-model:value="savedDatabase" filterable clearable :loading="saveDatabasesLoading" :disabled="!savedConnectionId" :options="saveDatabaseOptions" :placeholder="t('query.saveDatabasePlaceholder')" />
+          </div>
+          <div v-if="saveConnection" class="query-save-target-preview">
+            <NIcon><DatabaseOutlined /></NIcon><strong>{{ saveConnection.name }}</strong>
+            <template v-if="savedDatabase"><span>/</span><NIcon><AppstoreOutlined /></NIcon><strong>{{ savedDatabase }}</strong></template>
+            <span>/</span><span>{{ t(savedDatabase ? 'query.databaseQueries' : 'query.connectionQueries') }}</span>
+          </div>
+        </div>
       </NFormItem>
       <template #footer>
         <NSpace justify="end">

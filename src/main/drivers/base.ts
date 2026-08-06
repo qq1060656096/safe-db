@@ -1,6 +1,8 @@
 import type {
   ColumnFilter,
   ColumnInfo,
+  CheckConstraintInfo,
+  ForeignKeyInfo,
   IndexInfo,
   QueryResult,
   RoutineInfo,
@@ -20,10 +22,12 @@ export interface DbDriver {
   disconnect(): Promise<void>
   test(): Promise<void>
   listDatabases(): Promise<string[]>
-  listTables(database?: string): Promise<TableInfo[]>
+  listTables(database?: string, includeStats?: boolean): Promise<TableInfo[]>
   listRoutines(database?: string): Promise<RoutineInfo[]>
   listColumns(database: string | undefined, table: string, schema?: string): Promise<ColumnInfo[]>
   listIndexes(database: string | undefined, table: string, schema?: string): Promise<IndexInfo[]>
+  listForeignKeys(database: string | undefined, table: string, schema?: string): Promise<ForeignKeyInfo[]>
+  listCheckConstraints(database: string | undefined, table: string, schema?: string): Promise<CheckConstraintInfo[]>
   getObjectDdl(database: string | undefined, table: string, schema?: string): Promise<string>
   getRoutineDefinition(database: string | undefined, routine: string, type: RoutineInfo['type'], schema?: string, argumentsSignature?: string): Promise<string>
   getTableData(q: TableDataQuery): Promise<TableDataResult>

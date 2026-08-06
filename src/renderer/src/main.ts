@@ -11,7 +11,9 @@ const pinia = createPinia()
 app.use(pinia).use(router).use(i18n).mount('#app')
 document.documentElement.lang = i18n.global.locale.value
 
+const appStore = useAppStore(pinia)
+appStore.listenForAgentApprovals()
+
 if (import.meta.env.DEV) {
-  const store = useAppStore(pinia)
-  window.__store = { getState: () => store }
+  window.__store = { getState: () => appStore }
 }

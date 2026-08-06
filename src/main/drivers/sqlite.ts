@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3'
 import type {
   ColumnInfo,
+  CheckConstraintInfo,
+  ForeignKeyInfo,
   IndexInfo,
   QueryResult,
   RoutineInfo,
@@ -50,16 +52,23 @@ export class SqliteDriver implements DbDriver {
     return rows.map((r) => r.name)
   }
 
-  async listTables(database = 'main'): Promise<TableInfo[]> {
+  async listTables(database = 'main', includeStats = false): Promise<TableInfo[]> {
     const d = this.requireDb()
     const rows = d
       .prepare(
-        `SELECT name, type FROM ${quoteIdent(database)}.sqlite_master
+        `SELECT name, type, rootpage FROM ${quoteIdent(database)}.sqlite_master
          WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
          ORDER BY type, name`
       )
-      .all() as { name: string; type: string }[]
-    return rows.map((r) => ({ name: r.name, type: r.type as 'table' | 'view' }))
+      .all() as { name: string; type: string; rootpage: number }[]
+    return rows.map((r) => {
+      let rowCount: number | undefined
+      if (includeStats) {
+        const count = d.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(database)}.${quoteIdent(r.name)}`).get() as { n: number }
+        rowCount = count.n
+      }
+      return { name: r.name, type: r.type as 'table' | 'view', rowCount, objectId: r.rootpage || undefined }
+    })
   }
 
   async listRoutines(_database?: string): Promise<RoutineInfo[]> {
@@ -107,6 +116,44 @@ export class SqliteDriver implements DbDriver {
       })
     }
     return result
+  }
+
+  async listForeignKeys(database: string | undefined, table: string): Promise<ForeignKeyInfo[]> {
+    const dbName = database ?? 'main'
+    const rows = this.requireDb()
+      .prepare(`SELECT * FROM ${quoteIdent(dbName)}.pragma_foreign_key_list(?) ORDER BY id, seq`)
+      .all(table) as {
+      id: number
+      seq: number
+      table: string
+      from: string
+      to: string
+      on_update: string
+      on_delete: string
+    }[]
+    const result = new Map<number, ForeignKeyInfo>()
+    for (const row of rows) {
+      const existing = result.get(row.id)
+      if (existing) {
+        existing.columns.push(row.from)
+        existing.referencedColumns.push(row.to)
+      } else {
+        result.set(row.id, {
+          name: `fk_${table}_${row.id}`,
+          columns: [row.from],
+          referencedTable: row.table,
+          referencedColumns: [row.to],
+          onUpdate: row.on_update,
+          onDelete: row.on_delete
+        })
+      }
+    }
+    return [...result.values()]
+  }
+
+  async listCheckConstraints(_database: string | undefined, _table: string): Promise<CheckConstraintInfo[]> {
+    // SQLite 不提供结构化 CHECK 元数据；完整表达式仍可通过 object ddl 获取。
+    return []
   }
 
   async getObjectDdl(database: string | undefined, table: string): Promise<string> {

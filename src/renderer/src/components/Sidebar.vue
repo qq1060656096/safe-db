@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnlockOutlined } from '@vicons/antd'
-import { NButton, NDropdown, NIcon, NInput, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NModal, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
 import { isAppLocale, localeOptions } from '../i18n'
 import { useAppStore } from '../stores/app'
 import { useSettingsStore } from '../stores/settings'
+import { toCsv, toJson } from '../utils'
 import ConnectionDialog from './ConnectionDialog.vue'
 
 type NodeData =
@@ -29,6 +30,7 @@ const message = useMessage()
 const treeData = ref<DbTreeNode[]>([])
 const search = ref('')
 const expandedKeys = ref<TreeKey[]>([])
+const selectedKeys = ref<TreeKey[]>([])
 const dialogOpen = ref(false)
 const editing = ref<ConnectionMeta | null>(null)
 const contextMenuShow = ref(false)
@@ -36,6 +38,12 @@ const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuNode = ref<DbTreeNode | null>(null)
 const permissionChangingId = ref<string | null>(null)
+const duplicatingConnectionId = ref<string | null>(null)
+const copyModalOpen = ref(false)
+const copySource = ref<Extract<NodeData, { kind: 'table' }> | null>(null)
+const copyTargetName = ref('')
+const copyWithData = ref(true)
+const copyingTable = ref(false)
 
 const permissionType: Record<PermissionMode, 'info' | 'warning' | 'success'> = { readonly: 'info', approval: 'warning', full: 'success' }
 const languageOptions = localeOptions.map<DropdownOption>(({ value, label }) => ({ key: value, label }))
@@ -289,6 +297,194 @@ function openSavedQuery(query: SavedQuery): void {
 function openTable(node: Extract<NodeData, { kind: 'table' }>): void {
   store.openTab({ type: 'table', title: node.table, connectionId: node.connectionId, database: node.database, schema: node.schema, table: node.table })
 }
+function openObjectList(node: Extract<NodeData, { kind: 'objectGroup' | 'savedQueryGroup' }>): void {
+  const objectGroup = node.kind === 'savedQueryGroup' ? 'queries' : node.group
+  const existing = store.tabs.find((tab) => tab.type === 'objects'
+    && tab.connectionId === node.connectionId && tab.database === node.database
+    && tab.schema === ('schema' in node ? node.schema : undefined) && tab.objectGroup === objectGroup)
+  if (existing) {
+    store.setActiveTab(existing.id)
+    return
+  }
+  const location = node.database ?? connectionOf(node.connectionId)?.name ?? ''
+  const groupTitle = objectGroup === 'queries' ? t('sidebar.savedQueries') : objectGroupLabel(objectGroup)
+  store.openTab({
+    type: 'objects', title: `${location} - ${groupTitle}`, connectionId: node.connectionId,
+    database: node.database, schema: 'schema' in node ? node.schema : undefined, objectGroup
+  })
+}
+function findNode(key: TreeKey, nodes: DbTreeNode[] = treeData.value): DbTreeNode | undefined {
+  for (const node of nodes) {
+    if (node.key === key) return node
+    const found = node.children ? findNode(key, node.children) : undefined
+    if (found) return found
+  }
+  return undefined
+}
+function selectTreeNode(keys: TreeKey[]): void {
+  selectedKeys.value = keys
+  const node = keys.length ? findNode(keys[keys.length - 1]) : undefined
+  if (node?.data.kind === 'objectGroup' || node?.data.kind === 'savedQueryGroup') openObjectList(node.data)
+}
+function importRowsFromCsv(content: string, delimiter: string): Record<string, unknown>[] {
+  const matrix: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index]
+    if (quoted) {
+      if (character === '"' && content[index + 1] === '"') { cell += '"'; index += 1 }
+      else if (character === '"') quoted = false
+      else cell += character
+    } else if (character === '"' && cell.length === 0) quoted = true
+    else if (character === delimiter) { row.push(cell); cell = '' }
+    else if (character === '\n' || character === '\r') {
+      if (character === '\r' && content[index + 1] === '\n') index += 1
+      row.push(cell); matrix.push(row); row = []; cell = ''
+    } else cell += character
+  }
+  if (cell.length || row.length) { row.push(cell); matrix.push(row) }
+  const headers = (matrix.shift() ?? []).map((header, index) => (index === 0 ? header.replace(/^\uFEFF/, '') : header).trim())
+  if (!headers.length || headers.some((header) => !header)) throw new Error(t('sidebar.importMissingHeaders'))
+  if (new Set(headers.map((header) => header.toLocaleLowerCase())).size !== headers.length) throw new Error(t('sidebar.importDuplicateHeaders'))
+  return matrix
+    .filter((values) => values.some((value) => value !== ''))
+    .map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ''])))
+}
+function parseImportRows(name: string, content: string): Record<string, unknown>[] {
+  const lowerName = name.toLocaleLowerCase()
+  if (lowerName.endsWith('.json')) {
+    const parsed = JSON.parse(content.replace(/^\uFEFF/, '')) as unknown
+    const values = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { data?: unknown }).data) ? (parsed as { data: unknown[] }).data : null)
+    if (!values) throw new Error(t('sidebar.importJsonArrayRequired'))
+    if (values.some((value) => !value || typeof value !== 'object' || Array.isArray(value))) throw new Error(t('sidebar.importObjectRowsRequired'))
+    return values as Record<string, unknown>[]
+  }
+  const firstLine = content.split(/\r?\n/, 1)[0] ?? ''
+  const delimiter = lowerName.endsWith('.tsv') ? '\t' : ([',', '\t', ';'] as const)
+    .map((value) => ({ value, count: firstLine.split(value).length - 1 }))
+    .sort((left, right) => right.count - left.count)[0].value
+  return importRowsFromCsv(content, delimiter)
+}
+function sqlValue(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL'
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL'
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
+  return `'${text.replace(/'/g, "''")}'`
+}
+async function importTableData(connection: ConnectionMeta, node: Extract<NodeData, { kind: 'table' }>): Promise<void> {
+  try {
+    const file = await window.api.pickDataFile()
+    if (!file) return
+    const rows = parseImportRows(file.name, file.content)
+    if (!rows.length) throw new Error(t('sidebar.importNoRows'))
+    if (rows.length > 50000) throw new Error(t('sidebar.importTooManyRows'))
+    const columns = await window.api.listColumns(connection.id, node.database, node.table, node.schema)
+    const knownColumns = new Map(columns.map((column) => [column.name.toLocaleLowerCase(), column.name]))
+    const sourceColumns = new Set(rows.flatMap((row) => Object.keys(row).map((key) => key.toLocaleLowerCase())))
+    const matchedColumns = [...knownColumns].filter(([lowerName]) => sourceColumns.has(lowerName)).map(([, name]) => name)
+    if (!matchedColumns.length) throw new Error(t('sidebar.importNoMatchingColumns'))
+    const target = qualifiedTable(connection.type, node.database, node.schema, node.table)
+    const groupedRows = new Map<string, { columns: string[]; values: unknown[][] }>()
+    for (const row of rows) {
+      const rowValues = new Map(Object.entries(row).map(([key, value]) => [key.toLocaleLowerCase(), value]))
+      const presentColumns = matchedColumns.filter((column) => rowValues.has(column.toLocaleLowerCase()))
+      if (!presentColumns.length) continue
+      const key = presentColumns.join('\u0000')
+      const group = groupedRows.get(key) ?? { columns: presentColumns, values: [] }
+      group.values.push(presentColumns.map((column) => rowValues.get(column.toLocaleLowerCase())))
+      groupedRows.set(key, group)
+    }
+    const statements: string[] = []
+    let importCount = 0
+    for (const group of groupedRows.values()) {
+      importCount += group.values.length
+      for (let offset = 0; offset < group.values.length; offset += 500) {
+        const batch = group.values.slice(offset, offset + 500)
+        statements.push(`INSERT INTO ${target} (${group.columns.map((column) => quoteIdentifier(connection.type, column)).join(', ')}) VALUES\n${batch.map((values) => `(${values.map(sqlValue).join(', ')})`).join(',\n')};`)
+      }
+    }
+    dialog.warning({
+      title: t('sidebar.importDataTitle', { name: node.table }),
+      content: t('sidebar.importDataHint', { file: file.name, count: importCount, columns: matchedColumns.join(', ') }),
+      positiveText: t('sidebar.importDataConfirm'), negativeText: t('common.cancel'),
+      onPositiveClick: async () => {
+        const result = await store.executeWithApproval(connection.id, statements.join('\n'), node.database)
+        if (result.status === 'ok') message.success(t('sidebar.importedData', { count: importCount, name: node.table }))
+        else if (result.status === 'denied') message.warning(result.error ?? '')
+        else if (result.status === 'error') message.error(result.error ?? '')
+      }
+    })
+  } catch (error) {
+    message.error(t('sidebar.importDataFailed', { error: error instanceof Error ? error.message : String(error) }))
+  }
+}
+async function exportTableData(connection: ConnectionMeta, node: Extract<NodeData, { kind: 'table' }>, format: 'csv' | 'json'): Promise<void> {
+  try {
+    const first = await store.getTableData(connection.id, { database: node.database, schema: node.schema, table: node.table, page: 1, pageSize: 1 })
+    const cap = 50000
+    const result = first.total > 1
+      ? await store.getTableData(connection.id, { database: node.database, schema: node.schema, table: node.table, page: 1, pageSize: Math.min(first.total, cap) })
+      : first
+    const rows = result.rows.map((row) => Object.fromEntries(result.columns.map((column) => [column.name, row[column.name]])))
+    const content = format === 'csv' ? toCsv(result.columns.map((column) => column.name), rows) : toJson(rows)
+    const path = await window.api.exportData({
+      defaultName: `${node.table}.${format}`, content,
+      fileTypes: [format === 'csv' ? { name: 'CSV', extensions: ['csv'] } : { name: 'JSON', extensions: ['json'] }]
+    })
+    if (path) message.success(t('sidebar.exportedData', { count: rows.length, path, cap: first.total > cap ? t('grid.capped') : '' }))
+  } catch (error) {
+    message.error(t('sidebar.exportDataFailed', { error: error instanceof Error ? error.message : String(error) }))
+  }
+}
+function openCopyTable(node: Extract<NodeData, { kind: 'table' }>): void {
+  copySource.value = node
+  copyTargetName.value = `${node.table}_copy`
+  copyWithData.value = true
+  copyModalOpen.value = true
+}
+function closeCopyTable(): void {
+  if (copyingTable.value) return
+  copyModalOpen.value = false
+  copySource.value = null
+}
+async function confirmCopyTable(): Promise<void> {
+  const source = copySource.value
+  const targetName = copyTargetName.value.trim()
+  if (!source || !targetName) { message.warning(t('sidebar.copyTableNameRequired')); return }
+  const connection = connectionOf(source.connectionId)
+  if (!connection) return
+  copyingTable.value = true
+  try {
+    const sourceSql = qualifiedTable(connection.type, source.database, source.schema, source.table)
+    const targetSql = qualifiedTable(connection.type, source.database, source.schema, targetName)
+    let createSql: string
+    if (connection.type === 'mysql') createSql = `CREATE TABLE ${targetSql} LIKE ${sourceSql};`
+    else if (connection.type === 'postgres') createSql = `CREATE TABLE ${targetSql} (LIKE ${sourceSql} INCLUDING ALL);`
+    else {
+      const ddl = await window.api.getObjectDdl(connection.id, source.database, source.table, source.schema)
+      const prefix = /^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)/i
+      if (!prefix.test(ddl)) throw new Error(t('sidebar.copyTableDdlUnsupported'))
+      createSql = ddl.replace(prefix, `$1${targetSql}`)
+    }
+    const insertPrefix = connection.type === 'postgres' ? `INSERT INTO ${targetSql} OVERRIDING SYSTEM VALUE` : `INSERT INTO ${targetSql}`
+    const sql = `${createSql.replace(/;?\s*$/, ';')}${copyWithData.value ? `\n${insertPrefix} SELECT * FROM ${sourceSql};` : ''}`
+    const result = await store.executeWithApproval(connection.id, sql, source.database)
+    if (result.status === 'ok') {
+      message.success(t('sidebar.tableCopied', { source: source.table, target: targetName }))
+      copyModalOpen.value = false
+      copySource.value = null
+      await refreshTables(connection.id, source.database)
+    } else if (result.status === 'denied') message.warning(result.error ?? '')
+    else if (result.status === 'error') message.error(result.error ?? '')
+  } catch (error) {
+    message.error(t('sidebar.copyTableFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    copyingTable.value = false
+  }
+}
 async function runTableAction(connection: ConnectionMeta, node: Extract<NodeData, { kind: 'table' }>, action: string): Promise<void> {
   const name = qualifiedTable(connection.type, node.database, node.schema, node.table)
   if (action === 'copy') {
@@ -296,6 +492,9 @@ async function runTableAction(connection: ConnectionMeta, node: Extract<NodeData
     message.success(t('sidebar.copiedTableName', { name: node.table }))
     return
   }
+  if (action === 'duplicate') { openCopyTable(node); return }
+  if (action === 'import-data') { await importTableData(connection, node); return }
+  if (action === 'export-csv' || action === 'export-json') { await exportTableData(connection, node, action === 'export-csv' ? 'csv' : 'json'); return }
   if (action === 'truncate') {
     const sql = connection.type === 'sqlite' ? `DELETE FROM ${name};` : `TRUNCATE TABLE ${name};`
     dialog.warning({
@@ -325,6 +524,23 @@ async function onConnectionAction(connection: ConnectionMeta, action: string): P
   else if (action === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: connection.name }), connectionId: connection.id })
   else if (action === 'refresh') await openConnection(connection.id, true)
   else if (action === 'edit') { editing.value = connection; dialogOpen.value = true }
+  else if (action === 'duplicate') {
+    if (duplicatingConnectionId.value) return
+    duplicatingConnectionId.value = connection.id
+    try {
+      const existingNames = new Set(store.connections.map((item) => item.name))
+      const baseName = t('sidebar.connectionCopyName', { name: connection.name })
+      let copiedName = baseName
+      let suffix = 2
+      while (existingNames.has(copiedName)) copiedName = `${baseName} ${suffix++}`
+      const copied = await store.duplicateConnection(connection.id, copiedName)
+      message.success(t('sidebar.connectionCopied', { name: copied.name }))
+    } catch (error) {
+      message.error(t('sidebar.copyConnectionFailed', { error: error instanceof Error ? error.message : String(error) }))
+    } finally {
+      duplicatingConnectionId.value = null
+    }
+  }
   else if (action === 'disconnect') { await window.api.disconnect(connection.id); store.setConnected(connection.id, false); clearConnectionTree(connection.id) }
   else if (action === 'delete') {
     dialog.error({
@@ -340,6 +556,7 @@ function connectionOptions(connection: ConnectionMeta): DropdownOption[] {
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
     { key: 'refresh', label: t('common.refresh'), disabled: !connected, icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'edit', label: t('sidebar.editConnection'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
+    { key: 'duplicate', label: t('sidebar.copyConnection'), disabled: duplicatingConnectionId.value !== null, icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
     { key: 'disconnect', label: t('sidebar.disconnect'), disabled: !connected, icon: () => h(NIcon, null, { default: () => h(DisconnectOutlined) }) },
     { type: 'divider', key: 'divider' },
     { key: 'delete', label: t('sidebar.deleteConnection'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
@@ -356,6 +573,16 @@ function tableOptions(tableType: 'table' | 'view'): DropdownOption[] {
     common[0],
     { key: 'design', label: t('sidebar.designTable'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
     ...common.slice(1),
+    { key: 'duplicate', label: t('sidebar.copyTable'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
+    { type: 'divider', key: 'data-divider' },
+    { key: 'import-data', label: t('sidebar.importData'), icon: () => h(NIcon, null, { default: () => h(ImportOutlined) }) },
+    {
+      key: 'export-data', label: t('sidebar.exportData'), icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }),
+      children: [
+        { key: 'export-csv', label: t('sidebar.exportCsv') },
+        { key: 'export-json', label: t('sidebar.exportJson') }
+      ]
+    },
     { type: 'divider', key: 'divider' },
     { key: 'truncate', label: t('sidebar.truncateTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(ClearOutlined) }) },
     { key: 'drop', label: t('sidebar.dropTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
@@ -384,7 +611,19 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
     }
     return
   }
-  if (node.data.kind === 'savedQueryGroup') return
+  if (node.data.kind === 'savedQueryGroup') {
+    if (key === 'newQuery') {
+      const connection = connectionOf(node.data.connectionId)
+      const title = node.data.database ?? connection?.name ?? ''
+      store.openTab({
+        type: 'query',
+        title: t('sidebar.queryTitle', { name: title }),
+        connectionId: node.data.connectionId,
+        database: node.data.database
+      })
+    }
+    return
+  }
   if (node.data.kind === 'database') {
     if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: node.data.database }), connectionId: node.data.connectionId, database: node.data.database })
     else if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database })
@@ -412,7 +651,9 @@ function nodeOptions(node: DbTreeNode): DropdownOption[] {
     { type: 'divider', key: 'divider' },
     { key: 'delete', label: t('sidebar.deleteSavedQuery'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
   ]
-  if (node.data.kind === 'savedQueryGroup') return []
+  if (node.data.kind === 'savedQueryGroup') return [
+    { key: 'newQuery', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) }
+  ]
   if (node.data.kind === 'database') return [
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
     { key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }
@@ -479,7 +720,11 @@ function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
         : null
     content = h('span', { class: 'tree-node-title', onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node) }, [connection?.name ?? '', permissionControl])
   } else if (node.data.kind === 'objectGroup' || node.data.kind === 'savedQueryGroup') {
-    content = h('span', { class: 'tree-node-title', onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node) }, [
+    content = h('span', {
+      class: 'tree-node-title',
+      onClick: () => openObjectList(node.data as Extract<NodeData, { kind: 'objectGroup' | 'savedQueryGroup' }>),
+      onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node)
+    }, [
       node.data.kind === 'objectGroup' ? objectGroupLabel(node.data.group) : t('sidebar.savedQueries'),
       h('span', { class: 'tree-object-count' }, String(node.data.count))
     ])
@@ -597,8 +842,19 @@ function selectContextMenu(key: string | number): void {
       </span>
     </header>
     <div class="sidebar-search"><NInput v-model:value="search" clearable size="small" :placeholder="t('sidebar.searchPlaceholder')"><template #prefix><NIcon color="#aaa"><SearchOutlined /></NIcon></template></NInput></div>
-    <div class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="[]" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" @update:expanded-keys="updateExpandedKeys" /></div>
+    <div class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
     <NDropdown trigger="manual" placement="bottom-start" :show="contextMenuShow" :x="contextMenuX" :y="contextMenuY" :options="contextMenuOptions" @select="selectContextMenu" @clickoutside="contextMenuShow = false" />
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
+    <NModal :show="copyModalOpen" :mask-closable="!copyingTable" @update:show="(show) => { if (!show) closeCopyTable() }">
+      <NCard class="copy-table-modal" :title="t('sidebar.copyTableTitle', { name: copySource?.table ?? '' })" closable @close="closeCopyTable">
+        <NFormItem :label="t('sidebar.copyTableTarget')" required>
+          <NInput v-model:value="copyTargetName" autofocus :disabled="copyingTable" @keyup.enter="confirmCopyTable" />
+        </NFormItem>
+        <NCheckbox v-model:checked="copyWithData" :disabled="copyingTable">{{ t('sidebar.copyTableWithData') }}</NCheckbox>
+        <template #footer>
+          <div class="modal-actions"><NButton :disabled="copyingTable" @click="closeCopyTable">{{ t('common.cancel') }}</NButton><NButton type="primary" :loading="copyingTable" @click="confirmCopyTable">{{ t('sidebar.copyTableConfirm') }}</NButton></div>
+        </template>
+      </NCard>
+    </NModal>
   </aside>
 </template>

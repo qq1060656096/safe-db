@@ -274,6 +274,26 @@ export class ConnectionStore {
     return this.toMeta(record)
   }
 
+  /**
+   * 复制连接时直接复用已加密的凭据，避免将密码暴露给渲染进程。
+   * 新连接使用独立 id，后续编辑不会影响原连接。
+   */
+  duplicate(id: string, name: string): ConnectionMeta {
+    const source = this.connections.find((connection) => connection.id === id)
+    if (!source) throw new Error('连接不存在或已被删除')
+    const copiedName = name.trim()
+    if (!copiedName) throw new Error('连接名称不能为空')
+    const record: ConnectionConfig = {
+      ...source,
+      id: randomUUID(),
+      name: copiedName,
+      ssh: source.ssh ? { ...source.ssh } : undefined
+    }
+    this.connections.push(record)
+    this.persist()
+    return this.toMeta(record)
+  }
+
   /** 测试连接时合并已存密码与 SSH 密钥(编辑场景下留空) */
   mergePasswordForTest(cfg: ConnectionConfig): ConnectionConfig {
     const existing = cfg.id ? this.connections.find((x) => x.id === cfg.id) : undefined

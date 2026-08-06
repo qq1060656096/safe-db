@@ -1,6 +1,8 @@
 import mysql from 'mysql2/promise'
 import type {
   ColumnInfo,
+  CheckConstraintInfo,
+  ForeignKeyInfo,
   IndexInfo,
   QueryResult,
   RoutineInfo,
@@ -74,33 +76,42 @@ export class MysqlDriver implements DbDriver {
     return (rows as Record<string, unknown>[]).map((r) => String(Object.values(r)[0]))
   }
 
-  async listTables(database?: string): Promise<TableInfo[]> {
+  async listTables(database?: string, _includeStats = false): Promise<TableInfo[]> {
     const db = database || this.cfg.database
     if (!db) throw new Error('未指定数据库')
     const [rows] = await this.requireConn().query(
-      `SELECT TABLE_NAME AS name, TABLE_TYPE AS type, TABLE_COMMENT AS comment
+      `SELECT TABLE_NAME AS name, TABLE_TYPE AS type, TABLE_COMMENT AS comment,
+              TABLE_ROWS AS rowCount, CREATE_TIME AS createdAt, UPDATE_TIME AS updatedAt
        FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_TYPE, TABLE_NAME`,
       [db]
     )
-    return (rows as { name: string; type: string; comment: string }[]).map((r) => ({
-      name: r.name,
-      type: r.type === 'VIEW' ? 'view' : 'table',
-      comment: r.comment || undefined
-    }))
+    return (rows as Record<string, unknown>[]).map((r) => {
+      const dateValue = (value: unknown): string | undefined => value instanceof Date ? value.toISOString() : value ? String(value) : undefined
+      return {
+        name: String(r.name),
+        type: r.type === 'VIEW' ? 'view' : 'table',
+        comment: r.comment ? String(r.comment) : undefined,
+        rowCount: r.rowCount === null || r.rowCount === undefined ? undefined : Number(r.rowCount),
+        createdAt: dateValue(r.createdAt),
+        updatedAt: dateValue(r.updatedAt)
+      }
+    })
   }
 
   async listRoutines(database?: string): Promise<RoutineInfo[]> {
     const db = database || this.cfg.database
     if (!db) throw new Error('未指定数据库')
     const [rows] = await this.requireConn().query(
-      `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type
+      `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type, CREATED AS createdAt, LAST_ALTERED AS updatedAt
        FROM information_schema.ROUTINES
        WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME`,
       [db]
     )
-    return (rows as { name: string; type: string }[]).map((row) => ({
-      name: row.name,
-      type: row.type === 'PROCEDURE' ? 'procedure' : 'function'
+    return (rows as Record<string, unknown>[]).map((row) => ({
+      name: String(row.name),
+      type: row.type === 'PROCEDURE' ? 'procedure' : 'function',
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt ? String(row.createdAt) : undefined,
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt ? String(row.updatedAt) : undefined
     }))
   }
 
@@ -149,6 +160,72 @@ export class MysqlDriver implements DbDriver {
       }
     }
     return [...map.values()]
+  }
+
+  async listForeignKeys(database: string | undefined, table: string): Promise<ForeignKeyInfo[]> {
+    const db = database || this.cfg.database
+    if (!db) throw new Error('未指定数据库')
+    const [rows] = await this.requireConn().query(
+      `SELECT k.CONSTRAINT_NAME AS name, k.COLUMN_NAME AS col,
+              k.REFERENCED_TABLE_SCHEMA AS referencedSchema,
+              k.REFERENCED_TABLE_NAME AS referencedTable,
+              k.REFERENCED_COLUMN_NAME AS referencedColumn,
+              k.ORDINAL_POSITION AS ordinal,
+              r.UPDATE_RULE AS onUpdate, r.DELETE_RULE AS onDelete
+       FROM information_schema.KEY_COLUMN_USAGE k
+       JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+         ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
+        AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+       WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ?
+         AND k.REFERENCED_TABLE_NAME IS NOT NULL
+       ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION`,
+      [db, table]
+    )
+    const result = new Map<string, ForeignKeyInfo>()
+    for (const row of rows as Record<string, unknown>[]) {
+      const name = String(row.name)
+      const existing = result.get(name)
+      if (existing) {
+        existing.columns.push(String(row.col))
+        existing.referencedColumns.push(String(row.referencedColumn))
+      } else {
+        result.set(name, {
+          name,
+          columns: [String(row.col)],
+          referencedSchema: row.referencedSchema ? String(row.referencedSchema) : undefined,
+          referencedTable: String(row.referencedTable),
+          referencedColumns: [String(row.referencedColumn)],
+          onUpdate: row.onUpdate ? String(row.onUpdate) : undefined,
+          onDelete: row.onDelete ? String(row.onDelete) : undefined
+        })
+      }
+    }
+    return [...result.values()]
+  }
+
+  async listCheckConstraints(database: string | undefined, table: string): Promise<CheckConstraintInfo[]> {
+    const db = database || this.cfg.database
+    if (!db) throw new Error('未指定数据库')
+    try {
+      const [rows] = await this.requireConn().query(
+        `SELECT tc.CONSTRAINT_NAME AS name, cc.CHECK_CLAUSE AS expression
+         FROM information_schema.TABLE_CONSTRAINTS tc
+         JOIN information_schema.CHECK_CONSTRAINTS cc
+           ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+          AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+         WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ?
+           AND tc.CONSTRAINT_TYPE = 'CHECK'
+         ORDER BY tc.CONSTRAINT_NAME`,
+        [db, table]
+      )
+      return (rows as Record<string, unknown>[]).map((row) => ({
+        name: String(row.name),
+        expression: String(row.expression)
+      }))
+    } catch {
+      // MySQL 5.7 没有 CHECK_CONSTRAINTS 元数据表。
+      return []
+    }
   }
 
   async getObjectDdl(database: string | undefined, table: string): Promise<string> {

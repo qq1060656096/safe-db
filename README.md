@@ -1,25 +1,68 @@
-# safe db
+# safe db — 面向 AI Agent 的安全数据库工具
 
 [简体中文](README.md) | [English](README_EN.md)
 
-> 一个把“数据库客户端的效率”和“生产操作的安全边界”放在一起设计的桌面数据库工具。
+> 让 Codex、Claude Code 和其他 AI Agent 看懂数据库、执行 SQL，同时把权限、审批和审计留在你手里。
 
-**safe db 完全免费，所有功能均可免费使用。**
+> [!IMPORTANT]
+> **safe db 永久免费。现在免费，未来也免费；所有功能均可免费使用，不按连接数、查询次数或 Agent 数量收费。**
 
-safe db 面向需要频繁查看、排查和维护数据库的开发者。它提供熟悉的数据库浏览、SQL 编辑、数据网格与表结构设计体验，同时让每个连接都可以选择 **只读、审批、完全访问** 三种权限模式。
+AI Agent 已经能够阅读代码、修改项目、运行测试，但当它需要访问数据库时，开发者往往只能在两种不理想的方案中选择：把连接信息直接交给 Agent，或者自己充当它和数据库之间的“人工 API”。
 
-连接生产库时，不必再靠“我会小心”保护数据：写操作可以被直接拦截，也可以在真正执行前要求二次确认，并留下可检索的本地操作记录。
+safe db 提供第三种方式：它既是开发者熟悉的桌面数据库工作台，也是专门为 AI Agent 设计的本地数据库网关。Agent 可以通过结构化 CLI 发现连接、读取 Schema、检查并执行 SQL，但不会获得数据库密码；所有操作继续经过 safe db 的权限、审批和审计链路。
+
+你可以在同一个工具里：
+
+- 自己浏览数据库、编辑数据和设计表结构。
+- 让 Agent 自动理解一张或多张表，并返回稳定 JSON。
+- 用只读模式直接阻止写入，用审批模式把最终决定交给人。
+- 在本地保存连接与审计记录，不把数据库资产上传到第三方服务。
+
+## Navicat / TablePlus 的免费替代选择
+
+如果你的日常工作主要是连接数据库、浏览对象、编辑 SQL、管理表数据和修改表结构，safe db 可以作为 Navicat、TablePlus 等传统数据库管理工具的免费替代选择。
+
+但 safe db 不只是复制传统数据库客户端。它面向 AI Agent 时代重新设计了数据库访问方式：既能承担开发者常用的数据库管理工作，也能让 Codex、Claude Code 等 Agent 在不接触密码的情况下读取数据库结构、检查并执行 SQL，同时把高风险操作交给人确认。
+
+相比“拥有所有传统客户端功能”，safe db 当前更专注于三件事：
+
+- **开发者日常够用**：连接管理、对象浏览、SQL 编辑、表数据管理、结构设计和结果导出。
+- **Agent 可以直接使用**：稳定 JSON CLI、单表与多表结构上下文、SQL 执行和审批等待。
+- **生产操作有边界**：只读、审批、完全访问三档权限，加上本地审计记录。
+
+如果你依赖复杂的数据迁移、完整备份恢复、ER 图建模或大量数据库类型支持，仍可保留现有专业工具；safe db 希望先成为开发者和 AI Agent 最自然、最安全的日常数据库入口。
+
+## 让 Agent 在几条命令内理解数据库
+
+```bash
+# Agent 先发现有哪些连接
+safedb connection list
+
+# 再发现数据库与对象
+safedb database list --connection <连接ID>
+safedb object list --connection <连接ID> --database <数据库>
+
+# 一次读取单张或多张表结构
+safedb table describe --connection <连接ID> --database <数据库> \
+  --table users --table orders
+
+# SQL 从文件或标准输入进入，不出现在进程参数中
+safedb sql run --connection <连接ID> --database <数据库> --stdin < query.sql
+```
+
+CLI 默认输出稳定的单行 JSON，Codex、Claude Code 以及其他支持 Shell 的 Agent 都可以直接调用。人工在终端查看时可使用 `--human` 获得表格与摘要，或使用 `--format pretty` 查看缩进 JSON。Agent 只引用 safe db 中已有的连接，数据库与 SSH 凭据不会通过 CLI 暴露。
 
 ## 为什么是 safe db？
 
-常见数据库客户端通常只关心“能不能执行”，safe db 还关心“这条 SQL 是否应该现在执行”。
+常见数据库客户端只解决“人如何操作数据库”；safe db 同时解决“人和 AI Agent 如何安全地共享数据库能力”。
 
-- **默认更克制**：新连接默认使用只读模式，未知语句按高风险处理。
-- **风险可见**：SQL 在执行前被分类为读取、写入、DDL 或其他操作。
-- **防止手滑**：审批模式会拦下 `INSERT`、`UPDATE`、`DELETE` 与 DDL，确认后才执行。
-- **操作可追溯**：成功、失败、被阻止和被取消的操作都会进入本地操作日志。
-- **日常工作够顺手**：支持对象浏览、SQL 补全、数据编辑、结构设计、结果导出、保存查询与多窗口。
-- **本地优先**：连接配置、保存的查询和操作日志都保存在本机，不依赖云端服务。
+- **为 Agent 而生的 CLI**：连接、数据库、对象和表结构均为机器可读 JSON，支持单表和多表上下文。
+- **凭据不交给 Agent**：CLI 只使用已经保存在 safe db 中的连接，不返回数据库或 SSH 密码。
+- **同一条安全链路**：桌面端和 Agent CLI 共用 SQL 分类、权限判定、审批、执行与审计能力。
+- **默认更克制**：新连接默认只读，无法可靠识别的语句按高风险处理。
+- **人保留最终决定**：审批模式下，Agent 提交写操作后必须在桌面端由人确认。
+- **开发者体验完整**：对象浏览、SQL 补全、数据编辑、结构设计、结果导出、查询保存和多窗口都已具备。
+- **本地优先**：连接、保存的查询和操作日志都留在本机，不依赖云端数据库代理。
 
 ## 核心能力
 
@@ -27,6 +70,8 @@ safe db 面向需要频繁查看、排查和维护数据库的开发者。它提
 
 | 功能模块 | 主要能力 |
 | --- | --- |
+| AI Agent CLI | 连接发现、数据库与对象浏览、单/多表结构、DDL、SQL 检查与执行、审批等待 |
+| 机器可读协议 | 稳定 JSON 输出、本地 Socket 通信、明确的状态与错误码 |
 | 数据库连接 | MySQL、PostgreSQL、SQLite，支持连接测试 |
 | SSH 隧道 | MySQL / PostgreSQL 跳板机，支持密码与私钥认证 |
 | 对象浏览 | 浏览数据库、Schema、表、视图、函数和存储过程 |
@@ -39,6 +84,26 @@ safe db 面向需要频繁查看、排查和维护数据库的开发者。它提
 | 多语言 | 支持多语言界面，可按使用习惯切换语言 |
 | 工作台体验 | 多窗口和可调节面板 |
 
+### 支持的操作系统
+
+safe db 基于 Electron 和 Node.js，桌面端与 Agent CLI 支持主流桌面操作系统：
+
+| 操作系统 | 支持状态 | 说明 |
+| --- | --- | --- |
+| macOS | ✅ 支持 | Apple Silicon 与 Intel；凭据使用系统钥匙串保护 |
+| Windows | ✅ 支持 | Windows 10 / 11；本地 Agent 服务使用 Named Pipe |
+| Linux | ✅ 支持 | 推荐 Ubuntu、Debian、Fedora 等桌面发行版；保存凭据需要可用的系统密钥环 / Secret Service |
+
+当前仓库提供源码运行与构建方式。不同系统安装原生依赖后，需要执行 `npm run rebuild` 为当前 Electron 版本重建 SQLite 模块。
+
+### 支持的数据库
+
+| 数据库 | 对象与结构浏览 | SQL 执行 | SSH 隧道 | Agent CLI |
+| --- | --- | --- | --- | --- |
+| MySQL | ✅ | ✅ | ✅ | ✅ |
+| PostgreSQL | ✅ | ✅ | ✅ | ✅ |
+| SQLite | ✅ | ✅ | 不需要 | ✅ |
+
 ### 三档连接权限
 
 | 模式 | 读取操作 | 写入 / DDL | 适合场景 |
@@ -49,7 +114,7 @@ safe db 面向需要频繁查看、排查和维护数据库的开发者。它提
 
 权限模式还可以锁定，避免在使用连接时被随手切换。多语句 SQL 会按其中风险最高的语句处理；无法可靠识别的语句默认按写操作收紧权限。
 
-### 开发者需要的数据库工作台
+### 开发者和 Agent 共用的数据库工作台
 
 - MySQL、PostgreSQL、SQLite 连接与连接测试
 - MySQL / PostgreSQL SSH 跳板机，支持密码与私钥认证
@@ -64,17 +129,18 @@ safe db 面向需要频繁查看、排查和维护数据库的开发者。它提
 
 ### 安全执行链路
 
-所有来自 SQL 编辑器、数据网格和结构设计器的变更都经过同一条执行管道：
+无论 SQL 来自开发者还是 AI Agent，都会经过同一条执行管道：
 
 ```mermaid
 flowchart LR
-    UI["SQL 编辑器 / 数据网格 / 结构设计器"] --> IPC["Preload + IPC 类型契约"]
-    IPC --> Split["SQL 拆分与风险分类"]
+    Human["开发者：编辑器 / 数据网格 / 结构设计器"] --> Gateway["safe db 本地服务"]
+    Agent["AI Agent：safedb CLI"] --> Gateway
+    Gateway --> Split["SQL 拆分与风险分类"]
     Split --> Policy{"连接权限模式"}
     Policy -->|只读且有写入| Deny["阻止并记录"]
     Policy -->|审批且有写入| Confirm["一次性 Token 二次确认"]
     Policy -->|允许执行| Tx["事务执行"]
-    Confirm --> Tx
+    Confirm -->|桌面端人工确认| Tx
     Tx --> Driver["MySQL / PostgreSQL / SQLite Driver"]
     Tx --> Audit["本地操作日志"]
 ```
@@ -103,6 +169,15 @@ npm run dev
 4. 双击表查看数据，或右键连接创建 SQL 查询。
 5. 需要写入时，切换到“审批”模式即可保留二次确认保护。
 
+希望让 Agent 使用数据库时，再执行一次生产构建：
+
+```bash
+npm run build
+node scripts/safedb.mjs connection list
+```
+
+安装为 npm bin 后，可以直接使用 `safedb` 命令。
+
 ## 常用命令
 
 ```bash
@@ -115,12 +190,58 @@ npm run typecheck
 # SQL 风险分类器测试
 npm run test:classify
 
+# AI Agent CLI 服务测试
+npm run test:agent
+
+# AI Agent CLI 输出与多语言帮助测试
+npm run test:cli
+
 # 生成生产构建到 out/
 npm run build
 
 # 预览生产构建
 npm run start
 ```
+
+## AI Agent CLI 参考
+
+`safedb` 为 Codex、Claude Code 等可调用 Shell 的 Agent 提供机器可读的数据库入口。CLI 只使用 safe db 已保存的连接，不暴露数据库或 SSH 凭据；所有 SQL 仍经过现有的分类、权限、审批、事务和审计链路。
+
+使用 `safedb --help` 查看全部命令，使用 `safedb <命令> --help` 查看子命令参数。
+
+在源码仓库中先执行一次 `npm run build`，随后可通过 `node scripts/safedb.mjs` 调用；安装为 npm bin 后可直接使用 `safedb`：
+
+```bash
+# 发现连接与数据库对象
+safedb connection list
+safedb database list --connection <连接ID或精确名称>
+safedb object list --connection <连接ID> --database <数据库>
+
+# 单表或多表结构；--table 可以重复，单次最多 20 个不同表
+safedb table describe --connection <连接ID> --database <数据库> --schema <Schema> \
+  --table users --table orders
+
+# SQL 只从标准输入或文件读取，避免进入进程参数和 Shell 历史
+safedb sql check --connection <连接ID> --database <数据库> --file query.sql
+safedb sql run --connection <连接ID> --database <数据库> --stdin < query.sql
+
+# 审批模式的写操作返回 requestId，由桌面端人工处理
+safedb request get <requestId>
+safedb request wait <requestId> --timeout 60
+
+# 人类可读表格/摘要，以及缩进 JSON
+safedb connection list --human
+safedb table describe --connection <连接ID> --table users --format human
+safedb connection list --format pretty
+
+# 指定帮助语言；也可通过 SAFE_DB_LANG 设置
+safedb --help --lang en-US
+SAFE_DB_LANG=ja-JP safedb table describe --help
+```
+
+CLI 默认的 `--format json` 始终输出单个 JSON 对象，保持 Agent 与脚本兼容。`--format pretty` 输出完整的缩进 JSON；`--format human`（简写为 `--human`）根据命令输出表格、查询结果、DDL 或审批摘要。人类模式的错误写入标准错误，其他结果写入标准输出；各模式的进程退出码保持一致。只读连接会拒绝写入；审批连接会打开桌面审批窗口；完全访问连接沿用连接自身权限直接执行。后台服务未运行时，CLI 会尝试以无窗口模式启动已构建的 safe db。
+
+CLI 帮助支持 `zh-CN`、`zh-TW`、`en-US`、`ja-JP`、`ko-KR`、`de-DE`、`fr-FR`、`es-ES`、`pt-BR` 和 `ru-RU`。语言选择顺序为 `--lang`、`SAFE_DB_LANG`、系统 Locale；无法匹配时回退到简体中文。`--lang` 仅影响 `help` 和 `--help` 文本，不改变 JSON 协议字段。
 
 仓库的 `scripts/` 目录还包含覆盖 UI、三种数据库驱动、权限审批、只读绕过和结构设计器的端到端脚本。其中部分脚本需要本地 MySQL / PostgreSQL 测试实例，并通过开发模式下的 Electron CDP 端口运行。
 
@@ -129,6 +250,8 @@ npm run start
 ```bash
 npm run typecheck
 npm run test:classify
+npm run test:agent
+npm run test:cli
 npm run build
 ```
 
@@ -149,6 +272,7 @@ npm run build
 safe-db/
 ├── src/
 │   ├── main/
+│   │   ├── agent/        # Agent CLI 本地协议、服务与审批请求生命周期
 │   │   ├── core/         # SQL 拆分、风险分类、权限决策、统一执行器
 │   │   ├── drivers/      # MySQL / PostgreSQL / SQLite 驱动
 │   │   ├── ssh/          # SSH 隧道生命周期
@@ -179,6 +303,7 @@ safe-db/
 
 - **新增数据库驱动**：实现 `src/main/drivers/base.ts` 中的 `DbDriver` 接口，并在驱动管理器中注册。
 - **加固 SQL 分类器**：在 `src/main/core/sqlClassify.ts` 增加规则，同时为对抗性输入补充测试。
+- **扩展 Agent 协议**：完善机器可读的对象上下文、结果限制、错误码或新的 Agent 工具能力。
 - **完善数据库方言**：改进表结构 DDL、类型映射、函数定义或 SQL 补全。
 - **提升工作台体验**：优化数据网格、快捷键、可访问性、主题与大数据量场景。
 - **补充语言**：在 `src/renderer/src/locales/` 中扩展翻译，并保持 key 对齐。
@@ -187,4 +312,4 @@ safe-db/
 
 ---
 
-如果你也希望数据库客户端在“高效”之外多一道可靠的安全边界，欢迎试用、反馈并参与改进 safe db。
+如果你正在用 Codex、Claude Code 或自己的 Agent 开发项目，欢迎让 safe db 成为它访问数据库时的安全入口。项目永久免费，也欢迎反馈、贡献和一起把 AI Agent 的数据库体验做得更可靠。

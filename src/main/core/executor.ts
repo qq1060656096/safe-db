@@ -14,6 +14,11 @@ interface PendingApproval {
   createdAt: number
 }
 
+export interface ApprovalResolvedEvent {
+  token: string
+  response: ExecuteResponse
+}
+
 const APPROVAL_TTL_MS = 5 * 60 * 1000
 
 /**
@@ -22,6 +27,7 @@ const APPROVAL_TTL_MS = 5 * 60 * 1000
  */
 export class Executor {
   private pending = new Map<string, PendingApproval>()
+  private approvalListeners = new Set<(event: ApprovalResolvedEvent) => void>()
 
   constructor(
     private connections: ConnectionStore,
@@ -34,6 +40,15 @@ export class Executor {
     for (const [token, p] of this.pending) {
       if (now - p.createdAt > APPROVAL_TTL_MS) this.pending.delete(token)
     }
+  }
+
+  onApprovalResolved(listener: (event: ApprovalResolvedEvent) => void): () => void {
+    this.approvalListeners.add(listener)
+    return () => this.approvalListeners.delete(listener)
+  }
+
+  private emitApprovalResolved(token: string, response: ExecuteResponse): void {
+    for (const listener of this.approvalListeners) listener({ token, response })
   }
 
   async execute(connectionId: string, sql: string, database?: string): Promise<ExecuteResponse> {
@@ -74,8 +89,14 @@ export class Executor {
   async confirmExecute(token: string): Promise<ExecuteResponse> {
     const p = this.pending.get(token)
     this.pending.delete(token) // 一次性,无论成败都消费掉
-    if (!p) return { status: 'error', error: '审批已过期或已被处理,请重新执行' }
-    return this.doExecute(p.connectionId, p.sql, p.database, p.sqlKind, 'approved')
+    if (!p) {
+      const response: ExecuteResponse = { status: 'error', error: '审批已过期或已被处理,请重新执行' }
+      this.emitApprovalResolved(token, response)
+      return response
+    }
+    const response = await this.doExecute(p.connectionId, p.sql, p.database, p.sqlKind, 'approved')
+    this.emitApprovalResolved(token, response)
+    return response
   }
 
   async rejectExecute(token: string): Promise<void> {
@@ -95,6 +116,11 @@ export class Executor {
       status: 'blocked',
       error: '用户取消了审批',
       durationMs: 0
+    })
+    this.emitApprovalResolved(token, {
+      status: 'denied',
+      sqlKind: p.sqlKind,
+      error: '用户取消了审批'
     })
   }
 

@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ApprovalModal from '../components/ApprovalModal.vue'
 import AuditLog from '../components/AuditLog.vue'
 import DataGrid from '../components/DataGrid.vue'
+import ObjectListView from '../components/ObjectListView.vue'
 import PanelToggleIcon from '../components/PanelToggleIcon.vue'
 import QueryEditor from '../components/QueryEditor.vue'
 import RightPanel from '../components/RightPanel.vue'
@@ -261,6 +262,7 @@ function closeOverlayPanels(): void {
           <QueryEditor v-if="tab.type === 'query'" :tab="tab" />
           <DataGrid v-else-if="tab.type === 'table'" :tab="tab" />
           <StructureDesigner v-else-if="tab.type === 'structure'" :tab="tab" />
+          <ObjectListView v-else-if="tab.type === 'objects'" :tab="tab" />
           <AuditLog v-else />
         </NTabPane>
       </NTabs>

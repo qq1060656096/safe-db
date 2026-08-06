@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import type { ConnectionConfig, ConnectionMeta, ExecuteResponse, PermissionMode, SavedQuery, SavedQueryInput, SqlKind, TableDataQuery, TableDataResult } from '../../../shared/types'
+import type { AgentApprovalRequest, ConnectionConfig, ConnectionMeta, ExecuteResponse, PermissionMode, SavedQuery, SavedQueryInput, SqlKind, TableDataQuery, TableDataResult } from '../../../shared/types'
 import { i18n } from '../i18n'
 
-export type TabType = 'query' | 'table' | 'structure' | 'audit'
+export type ObjectGroup = 'tables' | 'views' | 'routines' | 'queries'
+export type TabType = 'query' | 'table' | 'structure' | 'objects' | 'audit'
 
 export interface AppTab {
   id: string
@@ -15,6 +16,7 @@ export interface AppTab {
   routine?: string
   routineType?: 'function' | 'procedure'
   routineArguments?: string
+  objectGroup?: ObjectGroup
   sql?: string
   savedQueryId?: string
 }
@@ -28,6 +30,8 @@ export interface PendingApproval {
 }
 
 let approvalResolver: ((response: ExecuteResponse) => void) | null = null
+let stopAgentApprovalListener: (() => void) | null = null
+const queuedAgentApprovals: AgentApprovalRequest[] = []
 
 export const useAppStore = defineStore('app', {
   state: () => ({
@@ -39,6 +43,25 @@ export const useAppStore = defineStore('app', {
     pendingApproval: null as PendingApproval | null
   }),
   actions: {
+    listenForAgentApprovals(): void {
+      if (stopAgentApprovalListener) return
+      stopAgentApprovalListener = window.api.onAgentApprovalRequested((request) => {
+        if (this.pendingApproval?.token === request.approvalToken || queuedAgentApprovals.some((item) => item.approvalToken === request.approvalToken)) return
+        queuedAgentApprovals.push(request)
+        this.showNextAgentApproval()
+      })
+    },
+    showNextAgentApproval(): void {
+      if (this.pendingApproval || queuedAgentApprovals.length === 0) return
+      const request = queuedAgentApprovals.shift()!
+      this.pendingApproval = {
+        token: request.approvalToken,
+        sql: request.sql,
+        sqlKind: request.sqlKind,
+        connectionName: request.connectionName,
+        database: request.database
+      }
+    },
     async loadConnections(): Promise<void> {
       this.connections = await window.api.listConnections()
       const connectionIds = new Set(this.connections.map((connection) => connection.id))
@@ -72,6 +95,11 @@ export const useAppStore = defineStore('app', {
     async saveConnection(config: ConnectionConfig): Promise<void> {
       await window.api.saveConnection(config)
       await this.loadConnections()
+    },
+    async duplicateConnection(id: string, name: string): Promise<ConnectionMeta> {
+      const copied = await window.api.duplicateConnection(id, name)
+      await this.loadConnections()
+      return copied
     },
     async updateConnectionPermissionMode(id: string, permissionMode: PermissionMode): Promise<ConnectionMeta | undefined> {
       const connection = this.connections.find((item) => item.id === id)
@@ -146,6 +174,7 @@ export const useAppStore = defineStore('app', {
       if (!tab || tab.type !== 'query') return
       tab.title = query.name
       tab.savedQueryId = query.id
+      tab.connectionId = query.connectionId
       tab.database = query.database
       tab.sql = query.sql
       tab.schema = undefined
@@ -173,6 +202,7 @@ export const useAppStore = defineStore('app', {
       this.pendingApproval = null
       if (!pending) {
         approvalResolver = null
+        this.showNextAgentApproval()
         return
       }
       if (accept) {
@@ -182,6 +212,7 @@ export const useAppStore = defineStore('app', {
         approvalResolver?.({ status: 'error', error: i18n.global.t('query.canceled') })
       }
       approvalResolver = null
+      this.showNextAgentApproval()
     },
     getTableData(connectionId: string, query: TableDataQuery): Promise<TableDataResult> {
       // Vue 会把数组与对象包装成 Proxy；IPC 的结构化克隆不能直接传递 Proxy。

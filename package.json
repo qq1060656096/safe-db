@@ -5,13 +5,19 @@
   "private": true,
   "description": "Navicat-like database management tool with permission modes (readonly / approval / full)",
   "main": "out/main/index.js",
+  "bin": {
+    "safedb": "scripts/safedb.mjs"
+  },
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "rebuild": "electron-rebuild -f -o better-sqlite3",
     "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
-    "test:classify": "node scripts/test-classify.mjs"
+    "test:classify": "node scripts/test-classify.mjs",
+    "test:agent": "node scripts/test-agent-service.mjs",
+    "test:cli": "node scripts/test-cli-output.mjs",
+    "cli": "node scripts/safedb.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

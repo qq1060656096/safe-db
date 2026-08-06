@@ -1,5 +1,6 @@
 import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
+import { basename, extname } from 'node:path'
 import type {
   AuditFilter,
   ConnectionConfig,
@@ -52,6 +53,12 @@ export function registerIpcHandlers(
     const meta = connections.save(cfg)
     // 配置可能已变化,重建驱动
     await drivers.invalidate(meta.id)
+    notifyOtherWindows(event, 'connections')
+    return meta
+  })
+
+  ipcMain.handle('connections:duplicate', (event, id: string, name: string) => {
+    const meta = connections.duplicate(id, name)
     notifyOtherWindows(event, 'connections')
     return meta
   })
@@ -172,6 +179,26 @@ export function registerIpcHandlers(
     }
   )
 
+  ipcMain.handle('data:pickImportFile', async (event) => {
+    const win = senderWindow(event)
+    if (!win) return null
+    const res = await dialog.showOpenDialog(win, {
+      title: '导入表数据',
+      properties: ['openFile'],
+      filters: [
+        { name: '数据文件', extensions: ['csv', 'tsv', 'json'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+    const filePath = res.filePaths[0]
+    if (res.canceled || !filePath) return null
+    const extension = extname(filePath).toLowerCase()
+    if (!['.csv', '.tsv', '.json'].includes(extension)) throw new Error('仅支持 CSV、TSV 或 JSON 文件')
+    const content = await readFile(filePath, 'utf-8')
+    if (Buffer.byteLength(content, 'utf-8') > 25 * 1024 * 1024) throw new Error('导入文件不能超过 25 MB')
+    return { name: basename(filePath), content }
+  })
+
   // ---- 连接与浏览 ----
   ipcMain.handle('db:connect', async (_e, id: string) => {
     try {
@@ -186,8 +213,8 @@ export function registerIpcHandlers(
 
   ipcMain.handle('db:databases', async (_e, id: string) => (await drivers.get(id)).listDatabases())
 
-  ipcMain.handle('db:tables', async (_e, id: string, database?: string) =>
-    (await drivers.get(id)).listTables(database)
+  ipcMain.handle('db:tables', async (_e, id: string, database?: string, includeStats?: boolean) =>
+    (await drivers.get(id)).listTables(database, includeStats)
   )
 
   ipcMain.handle('db:routines', async (_e, id: string, database?: string) =>
