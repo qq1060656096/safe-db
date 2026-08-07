@@ -20,6 +20,8 @@ export type { TableDataQuery, TableDataResult }
 export interface DbDriver {
   connect(): Promise<void>
   disconnect(): Promise<void>
+  /** 立即终止当前查询；允许通过断开底层会话实现，后续操作会自动重连。 */
+  cancel?(): Promise<void>
   test(): Promise<void>
   listDatabases(): Promise<string[]>
   listTables(database?: string, includeStats?: boolean): Promise<TableInfo[]>

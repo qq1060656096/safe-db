@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onMounted, ref, watch } from 'vue'
 import { CopyOutlined, DeleteOutlined, DownloadOutlined, FilterOutlined, PlusOutlined, ReloadOutlined, SaveOutlined, UndoOutlined } from '@vicons/antd'
 import { NAlert, NButton, NDataTable, NDropdown, NIcon, NInput, NPagination, NSelect, NTag, NText, useMessage, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -28,6 +28,14 @@ const lastSelectedRowIndex = ref<number | null>(null)
 const rowMenuShow = ref(false)
 const rowMenuX = ref(0)
 const rowMenuY = ref(0)
+const columnMenuShow = ref(false)
+const columnMenuX = ref(0)
+const columnMenuY = ref(0)
+const columnMenuTarget = ref<{ column: string; kind: 'header' | 'cell'; value?: unknown } | null>(null)
+const selectedColumns = ref<string[]>([])
+const lastSelectedColumnIndex = ref<number | null>(null)
+const tableRoot = ref<HTMLElement | null>(null)
+const selectedColumnSet = new Set<string>()
 const editingCell = ref<{ rowKey: string; column: string } | null>(null)
 const saving = ref(false)
 const showFilter = ref(false)
@@ -37,6 +45,11 @@ const exporting = ref(false)
 const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
 const keyColumns = computed(() => data.value?.keyColumns ?? [])
 const baseRows = computed(() => data.value?.rows ?? [])
+const columnNames = computed(() => (data.value?.columns ?? []).map((column) => column.name))
+const selectedColumnNames = computed(() => {
+  const selected = new Set(selectedColumns.value)
+  return columnNames.value.filter((column) => selected.has(column))
+})
 const activeFilterCount = computed(() => appliedFilters.value.length)
 const dirtyCount = computed(() => [...edits.value.values()].reduce((count, values) => count + values.size, 0) + newRows.value.reduce((count, row) => count + (Object.keys(row.values).length ? 1 : 0), 0) + deletedKeys.value.size)
 const operatorOptions = computed<SelectOption[]>(() => [
@@ -47,17 +60,52 @@ const exportOptions = computed<DropdownOption[]>(() => [
   { key: 'csv-page', label: t('grid.exportPageCsv') }, { key: 'json-page', label: t('grid.exportPageJson') }, { type: 'divider', key: 'divider' },
   { key: 'csv-all', label: t('grid.exportAllCsv') }, { key: 'json-all', label: t('grid.exportAllJson') }
 ])
-const rowCopyOptions = computed<DropdownOption[]>(() => [
-  { key: 'table', label: t('query.copyAsTable') },
-  { type: 'divider', key: 'divider' },
-  { key: 'select', label: t('query.copyAsSelect') },
-  { key: 'insert', label: t('query.copyAsInsert') },
-  { key: 'update', label: t('query.copyAsUpdate') },
-  { key: 'delete', label: t('query.copyAsDelete') }
-])
+const rowCopyOptions = computed<DropdownOption[]>(() => {
+  const dataOptions: DropdownOption[] = [
+    { key: 'headers-values', label: t('query.copyRowsWithHeaders', { count: selectedKeys.value.length }) },
+    { key: 'values', label: t('query.copyColumnValues') },
+    { key: 'headers', label: t('query.copyColumnNames') }
+  ]
+  const native = connection.value?.type === 'mongodb' || connection.value?.type === 'redis'
+  const copyAsOptions: DropdownOption[] = [
+    ...(native ? [] : [
+      { key: 'select', label: 'SELECT' },
+      { key: 'insert', label: 'INSERT' },
+      { key: 'update', label: 'UPDATE' },
+      { key: 'delete', label: 'DELETE' },
+      { type: 'divider' as const, key: 'sql-format-divider' }
+    ]),
+    { key: 'json', label: 'JSON' },
+    { key: 'csv', label: 'CSV' }
+  ]
+  return [
+    ...dataOptions,
+    { type: 'divider', key: 'divider' },
+    { key: 'copy-as', label: t('query.copyAs'), children: copyAsOptions }
+  ]
+})
+const columnCopyOptions = computed<DropdownOption[]>(() => {
+  const target = columnMenuTarget.value
+  if (!target) return []
+  const count = selectedColumnNames.value.length || 1
+  return [
+    { key: 'headers-values', label: t('query.copyColumnsWithHeaders', { count }) },
+    { key: 'values', label: t('query.copyColumnValues') },
+    { key: 'headers', label: t('query.copyColumnNames') },
+    ...(target.kind === 'cell'
+      ? [{ type: 'divider' as const, key: 'divider' }, { key: 'value', label: t('query.copyCellValue') }]
+      : [])
+  ]
+})
+const readOnlyHelp = computed(() => connection.value?.type === 'mongodb' || connection.value?.type === 'redis'
+  ? t('grid.nativeReadOnlyHelp') : t('grid.noPrimaryKeyHelp'))
 
 const numericTypes = /^(tinyint|smallint|mediumint|int|integer|bigint|serial|bigserial|decimal|numeric|float|double|real|number|money)/i
-function quoteIdentifier(type: DbType | undefined, name: string): string { return type === 'mysql' ? '`' + name.replace(/`/g, '``') + '`' : '"' + name.replace(/"/g, '""') + '"' }
+function quoteIdentifier(type: DbType | undefined, name: string): string {
+  if (type === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
+  if (type === 'sqlserver') return '[' + name.replace(/]/g, ']]') + ']'
+  return '"' + name.replace(/"/g, '""') + '"'
+}
 function toLiteral(value: unknown, column: ColumnInfo | undefined, type: DbType | undefined): string {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(value)
@@ -95,6 +143,12 @@ async function load(): Promise<void> {
     selectedKeys.value = []
     lastSelectedRowIndex.value = null
     rowMenuShow.value = false
+    columnMenuShow.value = false
+    columnMenuTarget.value = null
+    setSelectedColumns(selectedColumns.value.filter((column) => columnNames.value.includes(column)))
+    if (selectedColumns.value.length === 0) lastSelectedColumnIndex.value = null
+    await nextTick()
+    syncColumnHighlights()
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
   finally { loading.value = false }
 }
@@ -113,7 +167,7 @@ function buildSql(): string {
   const type = connection.value?.type
   const qi = (name: string): string => quoteIdentifier(type, name)
   const table = props.tab.table!
-  const qualified = type === 'postgres' ? `${qi(props.tab.schema ?? 'public')}.${qi(table)}` : props.tab.database ? `${qi(props.tab.database)}.${qi(table)}` : qi(table)
+  const qualified = type === 'postgres' ? `${qi(props.tab.schema ?? 'public')}.${qi(table)}` : type === 'sqlserver' ? `${qi(props.tab.schema ?? 'dbo')}.${qi(table)}` : props.tab.database ? `${qi(props.tab.database)}.${qi(table)}` : qi(table)
   const columnOf = (name: string): ColumnInfo | undefined => data.value?.columns.find((column) => column.name === name)
   const statements: string[] = []
   for (const row of baseRows.value) {
@@ -182,6 +236,15 @@ function tableCell(value: unknown): string {
   const text = String(value)
   return /[\t\r\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
+function clipboardValue(value: unknown): string {
+  if (value === null) return 'NULL'
+  if (value === undefined) return ''
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value) }
+    catch { return String(value) }
+  }
+  return String(value)
+}
 function escapeHtml(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
@@ -192,25 +255,128 @@ function displayedValue(row: Record<string, unknown>, column: string): unknown {
   const values = edits.value.get(key)
   return values?.has(column) ? values.get(column) : row[column]
 }
+function selectColumnFromHeader(event: MouseEvent): void {
+  if (!(event.target instanceof Element)) return
+  const header = event.target.closest('.n-data-table-th[data-col-key]') as HTMLElement | null
+  const column = header?.dataset.colKey
+  if (!header || !column || !tableRoot.value?.contains(header) || !columnNames.value.includes(column)) return
+  updateColumnSelection(event, column, false)
+  if (!event.target.closest('.n-data-table-sorter')) event.stopPropagation()
+}
+function openColumnMenuFromHeader(event: MouseEvent): void {
+  if (!(event.target instanceof Element)) return
+  const header = event.target.closest('.n-data-table-th[data-col-key]') as HTMLElement | null
+  const column = header?.dataset.colKey
+  if (!header || !column || !tableRoot.value?.contains(header) || !columnNames.value.includes(column)) return
+  openColumnMenu(event, column, 'header')
+}
+function setSelectedColumns(columns: string[]): void {
+  selectedColumns.value = columns
+  selectedColumnSet.clear()
+  for (const column of columns) selectedColumnSet.add(column)
+  syncColumnHighlights()
+}
+function syncColumnHighlights(): void {
+  tableRoot.value?.querySelectorAll<HTMLElement>('[data-col-key]').forEach((cell) => {
+    cell.classList.toggle('data-column-selected', selectedColumnSet.has(cell.dataset.colKey ?? ''))
+  })
+}
+function updateColumnSelection(event: MouseEvent, column: string, preserveSelected: boolean): void {
+  const index = columnNames.value.indexOf(column)
+  if (index < 0) return
+  const selected = new Set(selectedColumns.value)
+  if (event.shiftKey && lastSelectedColumnIndex.value !== null) {
+    const start = Math.min(lastSelectedColumnIndex.value, index)
+    const end = Math.max(lastSelectedColumnIndex.value, index)
+    for (let current = start; current <= end; current += 1) selected.add(columnNames.value[current])
+  } else if (event.metaKey || event.ctrlKey) {
+    if (selected.has(column)) selected.delete(column)
+    else selected.add(column)
+    lastSelectedColumnIndex.value = index
+  } else if (!preserveSelected || !selected.has(column)) {
+    selected.clear()
+    selected.add(column)
+    lastSelectedColumnIndex.value = index
+  }
+  setSelectedColumns(columnNames.value.filter((name) => selected.has(name)))
+}
+function openColumnMenu(event: MouseEvent, column: string, kind: 'header' | 'cell', value?: unknown): void {
+  event.preventDefault()
+  event.stopPropagation()
+  rowMenuShow.value = false
+  updateColumnSelection(event, column, true)
+  columnMenuTarget.value = { column, kind, value }
+  columnMenuX.value = event.clientX
+  columnMenuY.value = event.clientY
+  columnMenuShow.value = true
+}
+async function copyColumns(names: string[], includeHeaders: boolean, includeValues: boolean): Promise<void> {
+  const sourceRows = tableRows.value
+  const plainRows: string[] = []
+  if (includeHeaders) plainRows.push(names.map(tableCell).join('\t'))
+  if (includeValues) {
+    plainRows.push(...sourceRows.map((row) => names.map((column) => tableCell(clipboardValue(displayedValue(row, column)))).join('\t')))
+  }
+  const plain = plainRows.join('\n')
+  const head = includeHeaders ? `<thead><tr>${names.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>` : ''
+  const body = includeValues ? `<tbody>${sourceRows.map((row) => `<tr>${names.map((column) => `<td>${escapeHtml(clipboardValue(displayedValue(row, column)))}</td>`).join('')}</tr>`).join('')}</tbody>` : ''
+  try {
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/plain': new Blob([plain], { type: 'text/plain' }),
+      'text/html': new Blob([`<table>${head}${body}</table>`], { type: 'text/html' })
+    })])
+  } catch {
+    await navigator.clipboard.writeText(plain)
+  }
+}
+async function copyColumnItem(action: string | number): Promise<void> {
+  const target = columnMenuTarget.value
+  columnMenuShow.value = false
+  if (!target) return
+  try {
+    if (action === 'value' && target.kind === 'cell') {
+      await navigator.clipboard.writeText(clipboardValue(target.value))
+      message.success(t('common.copied'))
+      return
+    }
+    const names = selectedColumnNames.value.length ? selectedColumnNames.value : [target.column]
+    if (action !== 'headers-values' && action !== 'values' && action !== 'headers') return
+    await copyColumns(names, action !== 'values', action !== 'headers')
+    message.success(t('query.copiedColumns', { count: names.length }))
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  }
+}
 function selectedDisplayRows(): Record<string, unknown>[] {
   if (!data.value || selectedKeys.value.length === 0) return []
   const selected = new Set(selectedKeys.value.map(String))
   return tableRows.value.filter((row) => !row.__tempId && selected.has(String(row.__rowKey)))
 }
-async function copySelectedRowsAsTable(): Promise<void> {
+async function copySelectedRows(includeHeaders: boolean, includeValues: boolean): Promise<void> {
   if (!data.value) return
   const rows = selectedDisplayRows()
   const names = data.value.columns.map((column) => column.name)
-  const plain = [names.join('\t'), ...rows.map((row) => names.map((column) => tableCell(displayedValue(row, column))).join('\t'))].join('\n')
-  const html = `<table><thead><tr>${names.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${names.map((column) => `<td>${escapeHtml(displayedValue(row, column))}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+  const plainRows: string[] = []
+  if (includeHeaders) plainRows.push(names.map(tableCell).join('\t'))
+  if (includeValues) plainRows.push(...rows.map((row) => names.map((column) => tableCell(displayedValue(row, column))).join('\t')))
+  const plain = plainRows.join('\n')
+  const head = includeHeaders ? `<thead><tr>${names.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>` : ''
+  const body = includeValues ? `<tbody>${rows.map((row) => `<tr>${names.map((column) => `<td>${escapeHtml(displayedValue(row, column))}</td>`).join('')}</tr>`).join('')}</tbody>` : ''
   try {
     await navigator.clipboard.write([new ClipboardItem({
       'text/plain': new Blob([plain], { type: 'text/plain' }),
-      'text/html': new Blob([html], { type: 'text/html' })
+      'text/html': new Blob([`<table>${head}${body}</table>`], { type: 'text/html' })
     })])
   } catch {
     await navigator.clipboard.writeText(plain)
   }
+}
+async function copySelectedRowsAs(format: 'json' | 'csv'): Promise<void> {
+  if (!data.value) return
+  const names = data.value.columns.map((column) => column.name)
+  const projected = selectedDisplayRows().map((row) => Object.fromEntries(names.map((column) => [column, displayedValue(row, column)])))
+  const text = format === 'json' ? toJson(projected) : toCsv(names, projected).replace(/^\uFEFF/, '')
+  await navigator.clipboard.writeText(text)
 }
 function copiedSql(kind: 'select' | 'insert' | 'update' | 'delete'): string {
   if (!data.value || !props.tab.table) return ''
@@ -220,6 +386,7 @@ function copiedSql(kind: 'select' | 'insert' | 'update' | 'delete'): string {
   const table = props.tab.table
   const qualified = type === 'postgres'
     ? `${qi(props.tab.schema ?? 'public')}.${qi(table)}`
+    : type === 'sqlserver' ? `${qi(props.tab.schema ?? 'dbo')}.${qi(table)}`
     : props.tab.database ? `${qi(props.tab.database)}.${qi(table)}` : qi(table)
   const names = data.value.columns.map((column) => column.name)
   const columnOf = (name: string): ColumnInfo | undefined => data.value?.columns.find((column) => column.name === name)
@@ -246,9 +413,16 @@ function copiedSql(kind: 'select' | 'insert' | 'update' | 'delete'): string {
 async function copySelected(kind: string | number): Promise<void> {
   if (selectedKeys.value.length === 0) return
   try {
-    if (kind === 'table') await copySelectedRowsAsTable()
-    else await navigator.clipboard.writeText(copiedSql(String(kind) as 'select' | 'insert' | 'update' | 'delete'))
-    message.success(t('query.copiedRows', { count: selectedDisplayRows().length }))
+    if (kind === 'headers-values' || kind === 'values' || kind === 'headers') {
+      await copySelectedRows(kind !== 'values', kind !== 'headers')
+      message.success(kind === 'headers' ? t('common.copied') : t('query.copiedRows', { count: selectedDisplayRows().length }))
+    } else if (kind === 'json' || kind === 'csv') {
+      await copySelectedRowsAs(kind)
+      message.success(t('query.copiedRows', { count: selectedDisplayRows().length }))
+    } else {
+      await navigator.clipboard.writeText(copiedSql(String(kind) as 'select' | 'insert' | 'update' | 'delete'))
+      message.success(t('query.copiedRows', { count: selectedDisplayRows().length }))
+    }
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
   }
@@ -256,7 +430,10 @@ async function copySelected(kind: string | number): Promise<void> {
 function renderCell(value: unknown, row: Record<string, unknown>, column: ColumnInfo): ReturnType<typeof h> {
   const isNew = typeof row.__tempId === 'string'
   const rowKey = isNew ? String(row.__tempId) : rowKeyOf(row)
-  const current = isNew ? newRows.value.find((item) => item.tempId === rowKey)?.values[column.name] : (edits.value.get(rowKey)?.get(column.name) ?? value)
+  const editedValues = edits.value.get(rowKey)
+  const current = isNew
+    ? newRows.value.find((item) => item.tempId === rowKey)?.values[column.name]
+    : editedValues?.has(column.name) ? editedValues.get(column.name) : value
   if (editingCell.value?.rowKey === rowKey && editingCell.value.column === column.name) {
     return h(NInput, {
       size: 'small', autofocus: true, defaultValue: current == null ? '' : String(current), placeholder: t('grid.inputNull'),
@@ -267,16 +444,30 @@ function renderCell(value: unknown, row: Record<string, unknown>, column: Column
   const modified = isNew ? newRows.value.find((item) => item.tempId === rowKey)?.values[column.name] !== undefined : edits.value.get(rowKey)?.has(column.name)
   return h('div', {
     class: ['grid-cell-editable', modified && 'grid-cell-edited'],
+    onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', current),
     onDblclick: () => { if (data.value?.editable) editingCell.value = { rowKey, column: column.name } }
   }, current == null ? h(NText, { depth: 3 }, { default: () => t('common.nullValue') }) : String(current))
 }
 const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
   if (!data.value) return []
   return [
+    {
+      title: '#',
+      key: '__rowNumber',
+      width: 64,
+      align: 'right',
+      render: (row: Record<string, unknown>) => h('span', { class: 'table-row-number' }, row.__tempId ? '*' : (page.value - 1) * pageSize.value + Number(row.__rowIndex) + 1)
+    },
     { type: 'selection', disabled: (row) => Boolean(row.__tempId) },
     ...data.value.columns.map((column) => ({
-      title: () => h('span', null, [column.isPrimaryKey ? h('span', { class: 'primary-key', title: t('grid.primaryKey') }, '🔑') : null, column.name, h('small', { class: 'column-type' }, column.dataType)]),
-      key: column.name, ellipsis: { tooltip: true }, sorter: 'default' as const,
+      title: () => h('span', {
+        class: 'result-column-header',
+        title: `${column.name}\n${t('query.columnSelectionHelp')}`
+      }, [column.isPrimaryKey ? h('span', { class: 'primary-key', title: t('grid.primaryKey') }, '🔑') : null, column.name, h('small', { class: 'column-type' }, column.dataType)]),
+      key: column.name,
+      className: 'copyable-data-column',
+      cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
+      ellipsis: { tooltip: true }, sorter: 'default' as const,
       sortOrder: orderBy.value[0]?.column === column.name ? (orderBy.value[0].direction === 'asc' ? 'ascend' as const : 'descend' as const) : false as const,
       render: (row: Record<string, unknown>) => renderCell(row[column.name], row, column)
     }))
@@ -367,11 +558,12 @@ function updateSorter(sorter: DataTableSortState | null): void {
       </div>
       <div class="filter-actions"><NButton size="small" type="primary" @click="applyFilters">{{ t('common.apply') }}</NButton><NButton size="small" :disabled="activeFilterCount === 0 && Object.keys(filterInputs).length === 0" @click="clearFilters">{{ t('common.clear') }}</NButton></div>
     </div>
-    <NAlert v-if="data && !data.editable" type="info" class="module-alert">{{ t('grid.noPrimaryKeyHelp') }}</NAlert>
-    <div class="data-table-wrap padded">
+    <NAlert v-if="data && !data.editable" type="info" class="module-alert">{{ readOnlyHelp }}</NAlert>
+    <div ref="tableRoot" class="data-table-wrap padded" @click.capture="selectColumnFromHeader" @contextmenu.capture="openColumnMenuFromHeader">
       <NDataTable remote size="small" bordered :loading="loading" :columns="tableColumns" :data="tableRows" :row-key="(row: Record<string, unknown>) => String(row.__tempId ?? row.__rowKey)" :checked-row-keys="selectedKeys" :row-class-name="rowClassName" :row-props="(row: Record<string, unknown>) => ({ onClick: (event: MouseEvent) => selectTableRow(event, row), onContextmenu: (event: MouseEvent) => openTableRowMenu(event, row) })" :pagination="false" :scroll-x="Math.max(900, tableColumns.length * 160)" @update:checked-row-keys="updateSelectedKeys" @update:sorter="updateSorter" />
     </div>
     <NDropdown trigger="manual" placement="bottom-start" :show="rowMenuShow" :x="rowMenuX" :y="rowMenuY" :options="rowCopyOptions" @select="selectTableRowMenu" @clickoutside="rowMenuShow = false" />
+    <NDropdown trigger="manual" placement="bottom-start" :show="columnMenuShow" :x="columnMenuX" :y="columnMenuY" :options="columnCopyOptions" @select="copyColumnItem" @clickoutside="columnMenuShow = false" />
     <NPagination v-if="data" v-model:page="page" v-model:page-size="pageSize" :item-count="data.total + newRows.length" :page-sizes="[50, 100, 200, 500]" show-size-picker class="module-pagination"><template #prefix>{{ t('common.totalRows', { count: data.total + newRows.length }) }}</template></NPagination>
   </div>
 </template>

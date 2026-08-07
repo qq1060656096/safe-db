@@ -6,11 +6,19 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sqlCompletionExtension, type SqlCompletionCatalog } from '../sqlCompletion'
 
 const props = defineProps<{ modelValue: string; placeholder: string; completion: SqlCompletionCatalog }>()
-const emit = defineEmits<{ 'update:modelValue': [value: string]; run: [] }>()
+const emit = defineEmits<{ 'update:modelValue': [value: string]; run: [selectedSql: string] }>()
 const host = ref<HTMLDivElement | null>(null)
 const sqlLanguage = new Compartment()
 let view: EditorView | null = null
 let applyingExternalValue = false
+
+function getSelectedText(): string {
+  if (!view) return ''
+  const { from, to } = view.state.selection.main
+  return from === to ? '' : view.state.sliceDoc(from, to)
+}
+
+defineExpose({ getSelectedText })
 
 onMounted(() => {
   if (!host.value) return
@@ -22,7 +30,7 @@ onMounted(() => {
         basicSetup,
         sqlLanguage.of(sqlCompletionExtension(props.completion)),
         placeholderExtension(props.placeholder),
-        Prec.high(keymap.of([{ key: 'Mod-Enter', run: () => { emit('run'); return true } }])),
+        Prec.high(keymap.of([{ key: 'Mod-Enter', run: () => { emit('run', getSelectedText()); return true } }])),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !applyingExternalValue) emit('update:modelValue', update.state.doc.toString())
         })

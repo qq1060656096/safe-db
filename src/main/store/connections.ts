@@ -18,6 +18,27 @@ function portValue(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback
 }
 
+function isDbType(value: unknown): value is DbType {
+  return value === 'mysql' || value === 'postgres' || value === 'sqlite' || value === 'sqlserver'
+    || value === 'mongodb' || value === 'redis'
+}
+
+const DEFAULT_PORTS: Record<Exclude<DbType, 'sqlite'>, number> = {
+  mysql: 3306,
+  postgres: 5432,
+  sqlserver: 1433,
+  mongodb: 27017,
+  redis: 6379
+}
+
+const DEFAULT_USERS: Record<Exclude<DbType, 'sqlite'>, string> = {
+  mysql: 'root',
+  postgres: 'postgres',
+  sqlserver: 'sa',
+  mongodb: '',
+  redis: ''
+}
+
 /**
  * 连接配置持久化:userData/connections.json
  * 密码用 Electron safeStorage(macOS Keychain / Windows DPAPI)加密后 base64 存储。
@@ -166,13 +187,17 @@ export class ConnectionStore {
       connection.port ?? '',
       connection.user ?? '',
       connection.database ?? '',
-      connection.filePath ?? ''
+      connection.filePath ?? '',
+      connection.authDatabase ?? '',
+      connection.tls === true,
+      connection.encrypt === true,
+      connection.trustServerCertificate !== false
     ])
   }
 
   private normalizeImportedConnection(value: unknown, includeEncryptedSecrets: boolean): ConnectionConfig | null {
     if (!isRecord(value)) return null
-    const type: DbType | undefined = value.type === 'mysql' || value.type === 'postgres' || value.type === 'sqlite' ? value.type : undefined
+    const type: DbType | undefined = isDbType(value.type) ? value.type : undefined
     const name = textValue(value.name)
     if (!type || !name) return null
 
@@ -189,7 +214,7 @@ export class ConnectionStore {
       return { id, name, type, permissionMode, permissionModeLocked, color, filePath, password: '' }
     }
 
-    const defaultPort = type === 'mysql' ? 3306 : 5432
+    const defaultPort = DEFAULT_PORTS[type]
     const ssh = this.normalizeImportedSsh(value.ssh, includeEncryptedSecrets)
     return {
       id,
@@ -200,9 +225,13 @@ export class ConnectionStore {
       color,
       host: textValue(value.host) ?? '127.0.0.1',
       port: portValue(value.port, defaultPort),
-      user: textValue(value.user) ?? (type === 'mysql' ? 'root' : 'postgres'),
+      user: textValue(value.user) ?? DEFAULT_USERS[type],
       password: includeEncryptedSecrets ? this.importedEncryptedSecret(value.password) : '',
       database: textValue(value.database),
+      authDatabase: type === 'mongodb' ? textValue(value.authDatabase) : undefined,
+      tls: (type === 'mongodb' || type === 'redis') ? value.tls === true : undefined,
+      encrypt: type === 'sqlserver' ? value.encrypt === true : undefined,
+      trustServerCertificate: type === 'sqlserver' ? value.trustServerCertificate !== false : undefined,
       ssh
     }
   }

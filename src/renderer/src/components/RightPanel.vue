@@ -23,9 +23,9 @@ const ddlLoading = ref(false)
 let ddlRequestId = 0
 
 function quoteIdentifier(connection: ConnectionMeta, name: string): string {
-  return connection.type === 'mysql'
-    ? '`' + name.replace(/`/g, '``') + '`'
-    : '"' + name.replace(/"/g, '""') + '"'
+  if (connection.type === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
+  if (connection.type === 'sqlserver') return '[' + name.replace(/]/g, ']]') + ']'
+  return '"' + name.replace(/"/g, '""') + '"'
 }
 
 function sqlLiteral(value: string): string {
@@ -70,6 +70,10 @@ async function loadDdlWithReadQuery(tab: NonNullable<typeof activeTab.value>, cu
     return `${value.trim().replace(/;\s*$/, '')};`
   }
 
+  if (currentConnection.type === 'sqlserver' || currentConnection.type === 'mongodb' || currentConnection.type === 'redis') {
+    throw new Error(t('panel.ddlUnavailable'))
+  }
+
   const schema = tab.schema ?? 'public'
   const objectRows = await readRows(
     currentConnection.id,
@@ -111,6 +115,7 @@ async function loadRoutineWithReadQuery(tab: NonNullable<typeof activeTab.value>
   const routine = tab.routine!
   const routineType = tab.routineType ?? 'function'
   if (currentConnection.type === 'sqlite') throw new Error(t('panel.routineDefinitionUnavailable'))
+  if (currentConnection.type === 'sqlserver' || currentConnection.type === 'mongodb' || currentConnection.type === 'redis') throw new Error(t('panel.routineDefinitionUnavailable'))
   if (currentConnection.type === 'mysql') {
     const database = tab.database ?? currentConnection.database
     if (!database) throw new Error(t('panel.databaseRequired'))

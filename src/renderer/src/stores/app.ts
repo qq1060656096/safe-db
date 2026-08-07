@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import type { AgentApprovalRequest, ConnectionConfig, ConnectionMeta, ExecuteResponse, PermissionMode, SavedQuery, SavedQueryInput, SqlKind, TableDataQuery, TableDataResult } from '../../../shared/types'
 import { i18n } from '../i18n'
+import { invalidateConnectionMetadata } from '../metadataCache'
 
 export type ObjectGroup = 'tables' | 'views' | 'routines' | 'queries'
 export type TabType = 'query' | 'table' | 'structure' | 'objects' | 'audit'
@@ -23,6 +24,7 @@ export interface AppTab {
 
 export interface PendingApproval {
   token: string
+  connectionId: string
   sql: string
   sqlKind: SqlKind
   connectionName: string
@@ -56,6 +58,7 @@ export const useAppStore = defineStore('app', {
       const request = queuedAgentApprovals.shift()!
       this.pendingApproval = {
         token: request.approvalToken,
+        connectionId: request.connectionId,
         sql: request.sql,
         sqlKind: request.sqlKind,
         connectionName: request.connectionName,
@@ -63,7 +66,19 @@ export const useAppStore = defineStore('app', {
       }
     },
     async loadConnections(): Promise<void> {
-      this.connections = await window.api.listConnections()
+      const previous = new Map(this.connections.map((connection) => [connection.id, connection]))
+      const nextConnections = await window.api.listConnections()
+      const next = new Map(nextConnections.map((connection) => [connection.id, connection]))
+      // 只失效被删除或配置发生变化的连接，其他连接的缓存与进行中操作保持不动。
+      for (const [id, connection] of previous) {
+        const current = next.get(id)
+        if (!current || JSON.stringify(current) !== JSON.stringify(connection)) invalidateConnectionMetadata(id)
+      }
+      // 未变化的连接保留对象引用，避免其查询页 watcher 因数组刷新而重新加载元数据。
+      this.connections = nextConnections.map((connection) => {
+        const existing = previous.get(connection.id)
+        return existing && JSON.stringify(existing) === JSON.stringify(connection) ? existing : connection
+      })
       const connectionIds = new Set(this.connections.map((connection) => connection.id))
       this.tabs = this.tabs.filter((tab) => !tab.connectionId || connectionIds.has(tab.connectionId))
       if (this.activeTabId && !this.tabs.some((tab) => tab.id === this.activeTabId)) {
@@ -93,7 +108,8 @@ export const useAppStore = defineStore('app', {
       for (const tab of this.tabs) if (tab.savedQueryId === id) tab.savedQueryId = undefined
     },
     async saveConnection(config: ConnectionConfig): Promise<void> {
-      await window.api.saveConnection(config)
+      const saved = await window.api.saveConnection(config)
+      invalidateConnectionMetadata(saved.id)
       await this.loadConnections()
     },
     async duplicateConnection(id: string, name: string): Promise<ConnectionMeta> {
@@ -116,10 +132,12 @@ export const useAppStore = defineStore('app', {
       if (activeBelongsToConnection) this.activeTabId = this.tabs.at(-1)?.id ?? null
       delete this.connectedIds[id]
       this.savedQueries = this.savedQueries.filter((query) => query.connectionId !== id)
-      await this.loadConnections()
+      this.connections = this.connections.filter((connection) => connection.id !== id)
+      invalidateConnectionMetadata(id)
     },
     setConnected(id: string, connected: boolean): void {
       this.connectedIds[id] = connected
+      if (!connected) invalidateConnectionMetadata(id)
     },
     openTab(tab: Omit<AppTab, 'id'>): string {
       const id = crypto.randomUUID()
@@ -190,12 +208,18 @@ export const useAppStore = defineStore('app', {
         approvalResolver = resolve
         this.pendingApproval = {
           token: response.approvalToken!,
+          connectionId,
           sql,
           sqlKind: response.sqlKind ?? 'WRITE',
           connectionName,
           database
         }
       })
+    },
+    async cancelPendingQueryApproval(connectionId: string): Promise<boolean> {
+      if (!approvalResolver || this.pendingApproval?.connectionId !== connectionId) return false
+      await this.resolveApproval(false)
+      return true
     },
     async resolveApproval(accept: boolean): Promise<void> {
       const pending = this.pendingApproval

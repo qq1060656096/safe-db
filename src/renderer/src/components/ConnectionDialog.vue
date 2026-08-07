@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, h, reactive, ref, watch } from 'vue'
 import { FolderOpenOutlined, LockOutlined, UnlockOutlined } from '@vicons/antd'
-import { NAlert, NButton, NColorPicker, NForm, NFormItem, NIcon, NInput, NInputGroup, NInputGroupLabel, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSwitch, NTabPane, NTabs, useMessage, type SelectOption } from 'naive-ui'
+import { NAlert, NButton, NColorPicker, NForm, NFormItem, NIcon, NInput, NInputGroup, NInputGroupLabel, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSwitch, NTabPane, NTabs, useMessage, type SelectOption, type SelectRenderLabel } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionConfig, ConnectionMeta, DbType, PermissionMode, SshConfig } from '../../../shared/types'
 import { useAppStore } from '../stores/app'
+import DatabaseTypeIcon from './DatabaseTypeIcon.vue'
 
 interface SshFormValues extends Partial<SshConfig> {
   enabled: boolean
@@ -21,6 +22,10 @@ interface FormValues {
   user: string
   password: string
   database: string
+  authDatabase: string
+  tls: boolean
+  encrypt: boolean
+  trustServerCertificate: boolean
   filePath: string
   ssh: SshFormValues
 }
@@ -30,10 +35,15 @@ const emit = defineEmits<{ close: [] }>()
 const store = useAppStore()
 const message = useMessage()
 const { t } = useI18n()
-const defaultPorts: Record<DbType, number> = { mysql: 3306, postgres: 5432, sqlite: 0 }
+const defaultPorts: Record<DbType, number> = { mysql: 3306, postgres: 5432, sqlite: 0, sqlserver: 1433, mongodb: 27017, redis: 6379 }
 const databaseTypeOptions: SelectOption[] = [
-  { value: 'mysql', label: 'MySQL' }, { value: 'postgres', label: 'PostgreSQL' }, { value: 'sqlite', label: 'SQLite' }
+  { value: 'mysql', label: 'MySQL' }, { value: 'postgres', label: 'PostgreSQL' }, { value: 'sqlite', label: 'SQLite' },
+  { value: 'sqlserver', label: 'SQL Server' }, { value: 'mongodb', label: 'MongoDB' }, { value: 'redis', label: 'Redis' }
 ]
+const renderDatabaseTypeLabel: SelectRenderLabel = (option) => h('span', { class: 'database-type-select-label' }, [
+  h(DatabaseTypeIcon, { type: option.value as DbType }),
+  h('span', null, String(option.label ?? ''))
+])
 const form = reactive<FormValues>(createBlankForm())
 const activeSection = ref<'general' | 'ssh'>('general')
 const testing = reactive({ value: false })
@@ -43,7 +53,7 @@ function createBlankSsh(): SshFormValues {
   return { enabled: false, host: '', port: 22, user: '', authType: 'password', password: '', privateKeyPath: '', passphrase: '' }
 }
 function createBlankForm(): FormValues {
-  return { name: '', type: 'mysql', permissionMode: 'readonly', permissionModeLocked: false, host: '127.0.0.1', port: 3306, user: 'root', password: '', database: '', filePath: '', ssh: createBlankSsh() }
+  return { name: '', type: 'mysql', permissionMode: 'readonly', permissionModeLocked: false, host: '127.0.0.1', port: 3306, user: 'root', password: '', database: '', authDatabase: '', tls: false, encrypt: false, trustServerCertificate: true, filePath: '', ssh: createBlankSsh() }
 }
 function resetForm(): void {
   const next = props.initial
@@ -60,7 +70,11 @@ function resetForm(): void {
 }
 watch(() => props.show, (show) => { if (show) { activeSection.value = 'general'; resetForm() } }, { immediate: true })
 
-const permissionHelp = computed(() => t(`permission.${form.permissionMode}Help`))
+const permissionHelp = computed(() => {
+  const native = form.type === 'mongodb' || form.type === 'redis'
+  const mode = form.permissionMode[0].toUpperCase() + form.permissionMode.slice(1)
+  return t(`permission.${native ? `native${mode}Help` : `${form.permissionMode}Help`}`)
+})
 
 function onTypeChange(type: DbType): void {
   form.type = type
@@ -68,6 +82,8 @@ function onTypeChange(type: DbType): void {
   if (type === 'sqlite') activeSection.value = 'general'
   if (type === 'postgres') form.user = 'postgres'
   if (type === 'mysql') form.user = 'root'
+  if (type === 'sqlserver') form.user = 'sa'
+  if (type === 'mongodb' || type === 'redis') form.user = ''
 }
 async function pickDatabaseFile(): Promise<void> {
   const path = await window.api.pickSqliteFile()
@@ -82,7 +98,7 @@ function validate(): { message: string; section: 'general' | 'ssh' } | null {
   if (form.type === 'sqlite') return form.filePath ? null : { message: t('connection.validationFile'), section: 'general' }
   if (!form.host.trim()) return { message: t('connection.validationHost'), section: 'general' }
   if (!form.port || form.port < 1 || form.port > 65535) return { message: t('connection.validationPort'), section: 'general' }
-  if (!form.user.trim()) return { message: t('connection.validationUser'), section: 'general' }
+  if (form.type !== 'mongodb' && form.type !== 'redis' && !form.user.trim()) return { message: t('connection.validationUser'), section: 'general' }
   if (form.ssh.enabled) {
     if (!form.ssh.host?.trim()) return { message: t('connection.validationSshHost'), section: 'ssh' }
     if (!form.ssh.user?.trim()) return { message: t('connection.validationSshUser'), section: 'ssh' }
@@ -101,6 +117,10 @@ function buildPayload(): ConnectionConfig {
     id: props.initial?.id ?? '', name: form.name, type: form.type, permissionMode: form.permissionMode, permissionModeLocked: form.permissionModeLocked, color: form.color || undefined,
     host: form.type === 'sqlite' ? undefined : form.host, port: form.type === 'sqlite' ? undefined : (form.port ?? undefined),
     user: form.type === 'sqlite' ? undefined : form.user, password: form.password, database: form.database || undefined,
+    authDatabase: form.type === 'mongodb' ? (form.authDatabase || undefined) : undefined,
+    tls: form.type === 'mongodb' || form.type === 'redis' ? form.tls : undefined,
+    encrypt: form.type === 'sqlserver' ? form.encrypt : undefined,
+    trustServerCertificate: form.type === 'sqlserver' ? form.trustServerCertificate : undefined,
     filePath: form.type === 'sqlite' ? form.filePath : undefined, ssh
   }
 }
@@ -117,7 +137,6 @@ async function testConnection(): Promise<void> {
 }
 async function saveConnection(): Promise<void> {
   const error = validate()
-  if (error) { activeSection.value = error.section; message.warning(error.message); return }
   saving.value = true
   try {
     await store.saveConnection(buildPayload())
@@ -134,7 +153,7 @@ async function saveConnection(): Promise<void> {
     <NForm label-placement="left" label-align="left" :label-width="88" :show-feedback="false" class="connection-form">
       <NTabs v-model:value="activeSection" type="line" animated class="connection-tabs">
         <NTabPane name="general" :tab="t('connection.generalTab')" class="connection-tab-pane">
-          <NFormItem :label="t('connection.databaseType')" required><NSelect :value="form.type" :options="databaseTypeOptions" @update:value="(value) => onTypeChange(value as DbType)" /></NFormItem>
+          <NFormItem :label="t('connection.databaseType')" required><NSelect :value="form.type" :options="databaseTypeOptions" :render-label="renderDatabaseTypeLabel" @update:value="(value) => onTypeChange(value as DbType)" /></NFormItem>
           <NFormItem :label="t('connection.name')" required><NInput v-model:value="form.name" :placeholder="t('connection.namePlaceholder')" /></NFormItem>
           <NFormItem :label="t('connection.permissionMode')" required>
             <div class="permission-mode-control">
@@ -149,9 +168,15 @@ async function saveConnection(): Promise<void> {
           <template v-if="form.type !== 'sqlite'">
             <NFormItem :label="t('connection.host')" required><NInput v-model:value="form.host" placeholder="127.0.0.1" /></NFormItem>
             <NFormItem :label="t('connection.port')" required><NInputNumber v-model:value="form.port" :min="1" :max="65535" /></NFormItem>
-            <NFormItem :label="t('connection.user')" required><NInput v-model:value="form.user" autocomplete="off" /></NFormItem>
+            <NFormItem :label="t('connection.user')" :required="form.type !== 'mongodb' && form.type !== 'redis'"><NInput v-model:value="form.user" autocomplete="off" :placeholder="form.type === 'redis' ? 'default' : ''" /></NFormItem>
             <NFormItem :label="t('connection.password')" :show-feedback="Boolean(initial)" :feedback="initial ? t('connection.keepPassword') : undefined"><NInput v-model:value="form.password" type="password" show-password-on="click" autocomplete="new-password" :placeholder="initial ? '••••••••' : ''" /></NFormItem>
-            <NFormItem :label="t('connection.defaultDatabase')"><NInput v-model:value="form.database" :placeholder="form.type === 'postgres' ? 'postgres' : ''" /></NFormItem>
+            <NFormItem :label="t('connection.defaultDatabase')"><NInput v-model:value="form.database" :placeholder="form.type === 'postgres' ? 'postgres' : form.type === 'sqlserver' ? 'master' : form.type === 'mongodb' ? 'test' : form.type === 'redis' ? '0' : ''" /></NFormItem>
+            <NFormItem v-if="form.type === 'mongodb'" :label="t('connection.authDatabase')"><NInput v-model:value="form.authDatabase" placeholder="admin" /></NFormItem>
+            <NFormItem v-if="form.type === 'mongodb' || form.type === 'redis'" :label="t('connection.tls')"><NSwitch v-model:value="form.tls" /></NFormItem>
+            <template v-if="form.type === 'sqlserver'">
+              <NFormItem :label="t('connection.encrypt')"><NSwitch v-model:value="form.encrypt" /></NFormItem>
+              <NFormItem :label="t('connection.trustCertificate')"><NSwitch v-model:value="form.trustServerCertificate" /></NFormItem>
+            </template>
           </template>
           <NFormItem v-else :label="t('connection.databaseFile')" required>
             <NInputGroup><NInput v-model:value="form.filePath" placeholder="/path/to/data.db" /><NButton @click="pickDatabaseFile"><template #icon><NIcon><FolderOpenOutlined /></NIcon></template>{{ t('connection.choose') }}</NButton></NInputGroup>

@@ -32,6 +32,9 @@ const connectionTypeLabel = (value: AuditEntry['connectionType']): string => {
   if (value === 'mysql') return 'MySQL'
   if (value === 'postgres') return 'PostgreSQL'
   if (value === 'sqlite') return 'SQLite'
+  if (value === 'sqlserver') return 'SQL Server'
+  if (value === 'mongodb') return 'MongoDB'
+  if (value === 'redis') return 'Redis'
   return t('common.noValue')
 }
 const modeLabel = (value: PermissionMode): string => t(`permission.${value}`)

@@ -17,6 +17,11 @@ const api: Api = {
     ipcRenderer.on('data:changed', handler)
     return () => ipcRenderer.removeListener('data:changed', handler)
   },
+  onMetadataChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, connectionId: string) => listener(connectionId)
+    ipcRenderer.on('metadata:changed', handler)
+    return () => ipcRenderer.removeListener('metadata:changed', handler)
+  },
   onAgentApprovalRequested: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, request: AgentApprovalRequest) => listener(request)
     ipcRenderer.on('agent:approvalRequested', handler)
@@ -60,6 +65,7 @@ const api: Api = {
   // SQL 执行
   executeSql: (id: string, sql: string, database?: string) =>
     ipcRenderer.invoke('exec:sql', id, sql, database),
+  cancelSql: (id: string) => ipcRenderer.invoke('exec:cancel', id),
   confirmExecute: (token: string) => ipcRenderer.invoke('exec:confirm', token),
   rejectExecute: (token: string) => ipcRenderer.invoke('exec:reject', token),
 

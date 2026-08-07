@@ -71,6 +71,11 @@ export class PostgresDriver implements DbDriver {
     this.clients.clear()
   }
 
+  async cancel(): Promise<void> {
+    // pg.Client.end() 遇到活跃查询会直接销毁 socket，服务端随连接断开而停止查询。
+    await this.disconnect()
+  }
+
   async test(): Promise<void> {
     const c = new pg.Client(this.options(this.defaultDb()))
     await c.connect()

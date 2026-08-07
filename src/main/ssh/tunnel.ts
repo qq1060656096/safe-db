@@ -38,7 +38,7 @@ export function establishTunnel(cfg: ConnectionConfig): Promise<TunnelHandle> {
           socket.remoteAddress ?? '127.0.0.1',
           socket.remotePort ?? 0,
           cfg.host ?? '127.0.0.1',
-          cfg.port ?? (cfg.type === 'postgres' ? 5432 : 3306),
+          cfg.port ?? ({ mysql: 3306, postgres: 5432, sqlite: 0, sqlserver: 1433, mongodb: 27017, redis: 6379 }[cfg.type] ?? 0),
           (err, stream) => {
             if (err) {
               socket.destroy()

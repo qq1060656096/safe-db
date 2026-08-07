@@ -3,7 +3,7 @@ import type { ExecuteResponse, SqlKind } from '../../shared/types'
 import type { DriverManager } from '../drivers/manager'
 import type { AuditStore } from '../store/audit'
 import type { ConnectionStore } from '../store/connections'
-import { classifySql } from './sqlClassify'
+import { classifyDatabaseInput } from './nativeCommand'
 import { decide } from './permission'
 
 interface PendingApproval {
@@ -28,6 +28,7 @@ const APPROVAL_TTL_MS = 5 * 60 * 1000
 export class Executor {
   private pending = new Map<string, PendingApproval>()
   private approvalListeners = new Set<(event: ApprovalResolvedEvent) => void>()
+  private metadataListeners = new Set<(connectionId: string) => void>()
 
   constructor(
     private connections: ConnectionStore,
@@ -47,6 +48,15 @@ export class Executor {
     return () => this.approvalListeners.delete(listener)
   }
 
+  onMetadataChanged(listener: (connectionId: string) => void): () => void {
+    this.metadataListeners.add(listener)
+    return () => this.metadataListeners.delete(listener)
+  }
+
+  private emitMetadataChanged(connectionId: string): void {
+    for (const listener of this.metadataListeners) listener(connectionId)
+  }
+
   private emitApprovalResolved(token: string, response: ExecuteResponse): void {
     for (const listener of this.approvalListeners) listener({ token, response })
   }
@@ -56,7 +66,12 @@ export class Executor {
     if (!cfg) return { status: 'error', error: '连接不存在' }
     if (!sql.trim()) return { status: 'ok', results: [] }
 
-    const { kind } = classifySql(sql)
+    let kind: SqlKind
+    try {
+      kind = classifyDatabaseInput(cfg.type, sql).kind
+    } catch (error) {
+      return { status: 'error', error: error instanceof Error ? error.message : String(error) }
+    }
     const decision = decide(cfg.permissionMode, kind)
 
     if (decision === 'deny') {
@@ -136,7 +151,7 @@ export class Executor {
     const started = Date.now()
     try {
       const driver = await this.drivers.get(connectionId)
-      const { statements } = classifySql(sql)
+      const { statements } = classifyDatabaseInput(cfg.type, sql)
       const isWrite = kind === 'WRITE' || kind === 'DDL'
       const results = isWrite
         ? await driver.runInTransaction(
@@ -159,6 +174,10 @@ export class Executor {
         affectedRows: isWrite ? affectedRows : null,
         durationMs
       })
+      // Redis 写命令会增删 key，MongoDB 写入可能隐式创建集合，也属于元数据变化。
+      if (kind === 'DDL' || (kind === 'WRITE' && (cfg.type === 'mongodb' || cfg.type === 'redis'))) {
+        this.emitMetadataChanged(connectionId)
+      }
       return { status: 'ok', results, sqlKind: kind, durationMs }
     } catch (e) {
       const durationMs = Date.now() - started

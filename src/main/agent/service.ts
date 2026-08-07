@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto'
 import type { AgentApprovalRequest, ConnectionMeta, TableInfo } from '../../shared/types'
-import { classifySql } from '../core/sqlClassify'
+import { classifyDatabaseInput } from '../core/nativeCommand'
 import type { Executor } from '../core/executor'
 import type { DriverManager } from '../drivers/manager'
 import type { ConnectionStore } from '../store/connections'
@@ -38,6 +38,10 @@ function requiredString(params: Record<string, unknown>, key: string): string {
 function optionalString(params: Record<string, unknown>, key: string): string | undefined {
   const value = params[key]
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function defaultDatabase(connection: ConnectionMeta): string | undefined {
+  return connection.database ?? (connection.type === 'sqlite' ? 'main' : connection.type === 'redis' ? '0' : undefined)
 }
 
 export class AgentService {
@@ -112,7 +116,7 @@ export class AgentService {
       status: 'ok',
       data: {
         protocolVersion: '1',
-        databases: ['mysql', 'postgres', 'sqlite'],
+        databases: ['mysql', 'postgres', 'sqlite', 'sqlserver', 'mongodb', 'redis'],
         methods: [
           'connection.list',
           'database.list',
@@ -135,7 +139,7 @@ export class AgentService {
       id: connection.id,
       name: connection.name,
       type: connection.type,
-      defaultDatabase: connection.database,
+      defaultDatabase: defaultDatabase(connection),
       permissionMode: connection.permissionMode,
       permissionModeLocked: connection.permissionModeLocked === true,
       sshEnabled: connection.ssh?.enabled === true
@@ -169,7 +173,7 @@ export class AgentService {
         connection: { id: connection.id, name: connection.name, type: connection.type },
         databases: names.map((name) => ({
           name,
-          isDefault: name === connection.database || (connection.type === 'sqlite' && name === 'main')
+          isDefault: name === defaultDatabase(connection)
         }))
       }
     }
@@ -177,7 +181,7 @@ export class AgentService {
 
   private async listObjects(params: Record<string, unknown>): Promise<AgentServiceResult> {
     const connection = this.resolveConnection(requiredString(params, 'connection'))
-    const database = optionalString(params, 'database') ?? connection.database
+    const database = optionalString(params, 'database') ?? defaultDatabase(connection)
     const driver = await this.drivers.get(connection.id)
     const [tables, routines] = await Promise.all([
       driver.listTables(database),
@@ -187,7 +191,7 @@ export class AgentService {
       status: 'ok',
       data: {
         connection: { id: connection.id, name: connection.name, type: connection.type },
-        database: database ?? (connection.type === 'sqlite' ? 'main' : undefined),
+        database,
         objects: [
           ...tables.map((object) => ({
             schema: object.schema,
@@ -208,7 +212,7 @@ export class AgentService {
 
   private async getObjectDdl(params: Record<string, unknown>): Promise<AgentServiceResult> {
     const connection = this.resolveConnection(requiredString(params, 'connection'))
-    const database = optionalString(params, 'database') ?? connection.database
+    const database = optionalString(params, 'database') ?? defaultDatabase(connection)
     const name = requiredString(params, 'name')
     const schema = optionalString(params, 'schema')
     const ddl = await (await this.drivers.get(connection.id)).getObjectDdl(database, name, schema)
@@ -248,7 +252,7 @@ export class AgentService {
       object.name === ref.name && (!ref.schema || object.schema === ref.schema)
     )
     if (matches.length === 0) throw new AgentServiceError('TABLE_NOT_FOUND', '表不存在')
-    if (matches.length > 1 && connection.type === 'postgres') {
+    if (matches.length > 1 && (connection.type === 'postgres' || connection.type === 'sqlserver')) {
       throw new AgentServiceError('AMBIGUOUS_TABLE', '多个 Schema 中存在同名表，请指定 Schema')
     }
     return matches[0]
@@ -256,7 +260,7 @@ export class AgentService {
 
   private async describeTables(params: Record<string, unknown>): Promise<AgentServiceResult> {
     const connection = this.resolveConnection(requiredString(params, 'connection'))
-    const database = optionalString(params, 'database') ?? connection.database ?? (connection.type === 'sqlite' ? 'main' : undefined)
+    const database = optionalString(params, 'database') ?? defaultDatabase(connection)
     const refs = this.parseTableRefs(params)
     const driver = await this.drivers.get(connection.id)
     const objects = await driver.listTables(database)
@@ -307,7 +311,11 @@ export class AgentService {
           checks,
           metadataLimitations: connection.type === 'sqlite'
             ? ['SQLite 不提供结构化 CHECK 约束元数据，请使用 object ddl 查看完整定义']
-            : []
+            : connection.type === 'mongodb'
+              ? ['MongoDB 字段结构由最多 100 条文档推断']
+              : connection.type === 'redis'
+                ? ['Redis key 根据数据类型映射为只读表格']
+                : []
         })
       } catch (error) {
         failed += 1
@@ -334,9 +342,9 @@ export class AgentService {
 
   private checkSql(params: Record<string, unknown>): AgentServiceResult {
     const connection = this.resolveConnection(requiredString(params, 'connection'))
-    const database = optionalString(params, 'database') ?? connection.database
+    const database = optionalString(params, 'database') ?? defaultDatabase(connection)
     const sql = requiredString(params, 'sql')
-    const classified = classifySql(sql)
+    const classified = classifyDatabaseInput(connection.type, sql)
     return {
       status: 'ok',
       data: {
@@ -359,7 +367,7 @@ export class AgentService {
 
   private async runSql(params: Record<string, unknown>): Promise<AgentServiceResult> {
     const connection = this.resolveConnection(requiredString(params, 'connection'))
-    const database = optionalString(params, 'database') ?? connection.database
+    const database = optionalString(params, 'database') ?? defaultDatabase(connection)
     const sql = requiredString(params, 'sql')
     const response = await this.executor.execute(connection.id, sql, database)
     if (response.status === 'needsApproval' && response.approvalToken) {

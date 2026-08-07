@@ -1,4 +1,5 @@
 import mysql from 'mysql2/promise'
+import { normalizeMysqlSessionVariables } from '../core/nativeCommand'
 import type {
   ColumnInfo,
   CheckConstraintInfo,
@@ -58,6 +59,12 @@ export class MysqlDriver implements DbDriver {
   async disconnect(): Promise<void> {
     await this.conn?.end().catch(() => {})
     this.conn = null
+  }
+
+  async cancel(): Promise<void> {
+    const connection = this.conn
+    this.conn = null
+    connection?.destroy()
   }
 
   async test(): Promise<void> {
@@ -327,7 +334,7 @@ export class MysqlDriver implements DbDriver {
   async run(sql: string, database?: string): Promise<QueryResult[]> {
     const conn = this.requireConn()
     if (database) await conn.query(`USE ${quoteIdent(database)}`)
-    const [raw, fields] = await conn.query(sql)
+    const [raw, fields] = await conn.query(normalizeMysqlSessionVariables(sql))
     return this.normalize(raw, fields)
   }
 
@@ -338,7 +345,7 @@ export class MysqlDriver implements DbDriver {
     try {
       const results: QueryResult[] = []
       for (const s of sqls) {
-        const [raw, fields] = await conn.query(s)
+        const [raw, fields] = await conn.query(normalizeMysqlSessionVariables(s))
         results.push(...this.normalize(raw, fields))
       }
       await conn.commit()

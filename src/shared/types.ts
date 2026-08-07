@@ -1,6 +1,6 @@
 // 主进程与渲染进程共享的类型契约
 
-export type DbType = 'mysql' | 'postgres' | 'sqlite'
+export type DbType = 'mysql' | 'postgres' | 'sqlite' | 'sqlserver' | 'mongodb' | 'redis'
 
 /** 权限模式:只读 / 审批(本地二次确认)/ 完全访问 */
 export type PermissionMode = 'readonly' | 'approval' | 'full'
@@ -8,7 +8,7 @@ export type PermissionMode = 'readonly' | 'approval' | 'full'
 /** SQL 语句风险分类 */
 export type SqlKind = 'READ' | 'WRITE' | 'DDL' | 'OTHER'
 
-/** SSH 隧道配置(仅 mysql / postgres;经跳板机转发到目标库) */
+/** SSH 隧道配置(适用于所有 TCP 数据库连接) */
 export interface SshConfig {
   enabled: boolean
   host: string
@@ -32,7 +32,7 @@ export interface ConnectionConfig {
   permissionModeLocked?: boolean
   /** 连接标记色(Navicat 风格) */
   color?: string
-  // mysql / postgres
+  // TCP 数据库
   host?: string
   port?: number
   user?: string
@@ -40,9 +40,17 @@ export interface ConnectionConfig {
   password?: string
   /** 默认数据库(可选) */
   database?: string
+  /** MongoDB 验证库，默认与 database 相同 */
+  authDatabase?: string
+  /** MongoDB / Redis TLS */
+  tls?: boolean
+  /** SQL Server 传输加密 */
+  encrypt?: boolean
+  /** SQL Server 是否信任服务器证书 */
+  trustServerCertificate?: boolean
   // sqlite
   filePath?: string
-  /** SSH 隧道(仅 mysql / postgres) */
+  /** SSH 隧道(除 SQLite 外) */
   ssh?: SshConfig
 }
 
@@ -240,6 +248,8 @@ export interface Api {
   openNewWindow(): Promise<void>
   /** 其他窗口修改共享数据时通知当前窗口刷新；返回取消监听函数。 */
   onDataChanged(listener: (resource: 'connections' | 'queries' | 'all') => void): () => void
+  /** 任一窗口或 Agent 成功改变数据库元数据后，通知所有窗口失效对应连接的缓存。 */
+  onMetadataChanged(listener: (connectionId: string) => void): () => void
   /** Agent CLI 发起写操作时通知桌面端显示人工审批。 */
   onAgentApprovalRequested(listener: (request: AgentApprovalRequest) => void): () => void
 
@@ -281,6 +291,8 @@ export interface Api {
 
   // SQL 执行(统一权限管道)
   executeSql(id: string, sql: string, database?: string): Promise<ExecuteResponse>
+  /** 停止该连接当前正在执行的查询；只影响指定连接。 */
+  cancelSql(id: string): Promise<boolean>
   confirmExecute(token: string): Promise<ExecuteResponse>
   rejectExecute(token: string): Promise<void>
 

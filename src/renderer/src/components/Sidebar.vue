@@ -5,10 +5,12 @@ import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NModal,
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
 import { isAppLocale, localeOptions } from '../i18n'
+import { invalidateConnectionMetadata, loadColumnMetadata, loadDatabaseMetadata, loadTableMetadata } from '../metadataCache'
 import { useAppStore } from '../stores/app'
 import { useSettingsStore } from '../stores/settings'
 import { toCsv, toJson } from '../utils'
 import ConnectionDialog from './ConnectionDialog.vue'
+import DatabaseTypeIcon from './DatabaseTypeIcon.vue'
 
 type NodeData =
   | { kind: 'connection'; connectionId: string }
@@ -39,6 +41,8 @@ const contextMenuY = ref(0)
 const contextMenuNode = ref<DbTreeNode | null>(null)
 const permissionChangingId = ref<string | null>(null)
 const duplicatingConnectionId = ref<string | null>(null)
+type ConnectionActivity = 'connecting' | 'refreshing'
+const connectionActivities = ref<Record<string, ConnectionActivity>>({})
 const copyModalOpen = ref(false)
 const copySource = ref<Extract<NodeData, { kind: 'table' }> | null>(null)
 const copyTargetName = ref('')
@@ -46,6 +50,13 @@ const copyWithData = ref(true)
 const copyingTable = ref(false)
 
 const permissionType: Record<PermissionMode, 'info' | 'warning' | 'success'> = { readonly: 'info', approval: 'warning', full: 'success' }
+function renderConnectionTypeIcon(connection: ConnectionMeta): ReturnType<typeof h> {
+  return h(DatabaseTypeIcon, {
+    type: connection.type,
+    color: connection.color,
+    muted: !store.connectedIds[connection.id]
+  })
+}
 const languageOptions = localeOptions.map<DropdownOption>(({ value, label }) => ({ key: value, label }))
 const currentLocaleLabel = computed(() => localeOptions.find(({ value }) => value === settings.locale)?.shortLabel ?? '中')
 function selectLocale(value: string | number): void {
@@ -55,7 +66,7 @@ const queryConnectionOptions = computed<DropdownOption[]>(() => store.connection
   ? store.connections.map((connection) => ({
       key: connection.id,
       label: connection.name,
-      icon: () => h(NIcon, null, { default: () => h(DatabaseOutlined) })
+      icon: () => renderConnectionTypeIcon(connection)
     }))
   : [{ key: 'empty', label: t('sidebar.noConnections'), disabled: true }]
 )
@@ -69,17 +80,31 @@ function databaseKey(id: string, database: string): string { return `db:${id}:${
 function savedQueryGroupKey(id: string, database?: string): string { return `query-group:${id}:${database ?? ''}` }
 function sqlLiteral(value: string): string { return `'${value.replace(/'/g, "''")}'` }
 function quoteIdentifier(type: DbType | undefined, name: string): string {
-  return type === 'mysql' ? '`' + name.replace(/`/g, '``') + '`' : '"' + name.replace(/"/g, '""') + '"'
+  if (type === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
+  if (type === 'sqlserver') return '[' + name.replace(/]/g, ']]') + ']'
+  return '"' + name.replace(/"/g, '""') + '"'
 }
+function isRelational(type: DbType | undefined): boolean { return type !== 'mongodb' && type !== 'redis' }
 function qualifiedTable(type: DbType | undefined, database: string | undefined, schema: string | undefined, table: string): string {
   if (type === 'postgres') return `${quoteIdentifier(type, schema ?? 'public')}.${quoteIdentifier(type, table)}`
+  if (type === 'sqlserver') return `${quoteIdentifier(type, schema ?? 'dbo')}.${quoteIdentifier(type, table)}`
   if (type === 'mysql' && database) return `${quoteIdentifier(type, database)}.${quoteIdentifier(type, table)}`
   return quoteIdentifier(type, table)
 }
 function connectionNode(connection: ConnectionMeta): DbTreeNode {
   return { key: connectionKey(connection.id), isLeaf: false, label: connection.name, children: withSavedQueryGroup([], connection.id), data: { kind: 'connection', connectionId: connection.id } }
 }
-function rebuildRoots(): void { treeData.value = store.connections.map(connectionNode) }
+let renderedConnections = new Map<string, ConnectionMeta>()
+function rebuildRoots(): void {
+  const existingNodes = new Map(treeData.value
+    .filter((node) => node.data.kind === 'connection')
+    .map((node) => [node.data.kind === 'connection' ? node.data.connectionId : '', node]))
+  treeData.value = store.connections.map((connection) => {
+    const existing = existingNodes.get(connection.id)
+    return existing && renderedConnections.get(connection.id) === connection ? existing : connectionNode(connection)
+  })
+  renderedConnections = new Map(store.connections.map((connection) => [connection.id, connection]))
+}
 watch(() => store.connections, rebuildRoots, { immediate: true })
 
 function setNodeChildren(key: TreeKey, children: DbTreeNode[] | undefined): void {
@@ -132,6 +157,13 @@ function updateExpandedKeys(keys: TreeKey[]): void {
   }
 }
 function connectionOf(id: string): ConnectionMeta | undefined { return store.connections.find((connection) => connection.id === id) }
+function connectionActivityOf(id: string): ConnectionActivity | undefined { return connectionActivities.value[id] }
+function setConnectionActivity(id: string, activity?: ConnectionActivity): void {
+  const next = { ...connectionActivities.value }
+  if (activity) next[id] = activity
+  else delete next[id]
+  connectionActivities.value = next
+}
 
 async function loadConnectionChildren(connectionId: string, force = false): Promise<DbTreeNode[]> {
   const connection = connectionOf(connectionId)
@@ -145,7 +177,7 @@ async function loadConnectionChildren(connectionId: string, force = false): Prom
     }
     store.setConnected(connectionId, true)
   }
-  const databases = await window.api.listDatabases(connectionId)
+  const databases = await loadDatabaseMetadata(connectionId)
   const visibleDatabases = connection.type === 'sqlite' ? databases.filter((name) => name === 'main') : databases
   const databaseNodes: DbTreeNode[] = visibleDatabases.map((database) => ({
     key: databaseKey(connectionId, database), isLeaf: false, label: database,
@@ -187,11 +219,11 @@ function objectGroups(
   const tableNodes = tables.filter((table) => table.type === 'table').map((table) => tableNode(connection.id, database, table))
   const viewNodes = tables.filter((table) => table.type === 'view').map((table) => tableNode(connection.id, database, table))
   const groups = [makeGroup('tables', tableNodes), makeGroup('views', viewNodes)]
-  if (connection.type !== 'sqlite') groups.push(makeGroup('routines', routines.map((routine) => routineNode(connection.id, database, routine))))
+  if (connection.type === 'mysql' || connection.type === 'postgres' || connection.type === 'sqlserver') groups.push(makeGroup('routines', routines.map((routine) => routineNode(connection.id, database, routine))))
   return groups
 }
 async function listRoutines(connection: ConnectionMeta, database: string): Promise<RoutineInfo[]> {
-  if (connection.type === 'sqlite') return []
+  if (connection.type === 'sqlite' || connection.type === 'mongodb' || connection.type === 'redis') return []
   if (typeof window.api.listRoutines === 'function') {
     try {
       return await window.api.listRoutines(connection.id, database)
@@ -200,6 +232,7 @@ async function listRoutines(connection: ConnectionMeta, database: string): Promi
       if (!/No handler registered for ['"]?db:routines/.test(detail)) throw error
     }
   }
+  if (connection.type === 'sqlserver') return []
   const sql = connection.type === 'mysql'
     ? `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ${sqlLiteral(database)} ORDER BY ROUTINE_TYPE, ROUTINE_NAME`
     : `SELECT n.nspname AS schema, p.proname AS name, p.prokind AS kind, pg_get_function_identity_arguments(p.oid) AS arguments
@@ -222,7 +255,7 @@ async function loadDatabaseChildren(connectionId: string, database: string): Pro
   const connection = connectionOf(connectionId)
   if (!connection) return []
   const [tables, routines] = await Promise.all([
-    window.api.listTables(connectionId, database),
+    loadTableMetadata(connectionId, database),
     listRoutines(connection, database)
   ])
   const schemaNames = new Set<string>()
@@ -252,7 +285,10 @@ async function loadNode(node: TreeOption): Promise<void> {
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); setNodeChildren(current.key!, []) }
 }
 async function openConnection(connectionId: string, force = false): Promise<void> {
+  if (connectionActivityOf(connectionId)) return
+  setConnectionActivity(connectionId, force || store.connectedIds[connectionId] ? 'refreshing' : 'connecting')
   try {
+    if (force) invalidateConnectionMetadata(connectionId)
     const children = await loadConnectionChildren(connectionId, force)
     if (!store.connectedIds[connectionId]) return
     const key = connectionKey(connectionId)
@@ -262,10 +298,14 @@ async function openConnection(connectionId: string, force = false): Promise<void
     store.setConnected(connectionId, false)
     clearConnectionTree(connectionId)
     message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    setConnectionActivity(connectionId)
   }
 }
 async function refreshTables(connectionId: string, database?: string): Promise<void> {
   if (database === undefined) return
+  invalidateConnectionMetadata(connectionId)
+  await loadDatabaseMetadata(connectionId).catch(() => [])
   setNodeChildren(databaseKey(connectionId, database), await loadDatabaseChildren(connectionId, database))
 }
 async function toggleNodeExpanded(node: DbTreeNode): Promise<void> {
@@ -381,7 +421,7 @@ async function importTableData(connection: ConnectionMeta, node: Extract<NodeDat
     const rows = parseImportRows(file.name, file.content)
     if (!rows.length) throw new Error(t('sidebar.importNoRows'))
     if (rows.length > 50000) throw new Error(t('sidebar.importTooManyRows'))
-    const columns = await window.api.listColumns(connection.id, node.database, node.table, node.schema)
+    const columns = await loadColumnMetadata(connection.id, node.database, node.table, node.schema)
     const knownColumns = new Map(columns.map((column) => [column.name.toLocaleLowerCase(), column.name]))
     const sourceColumns = new Set(rows.flatMap((row) => Object.keys(row).map((key) => key.toLocaleLowerCase())))
     const matchedColumns = [...knownColumns].filter(([lowerName]) => sourceColumns.has(lowerName)).map(([, name]) => name)
@@ -463,6 +503,18 @@ async function confirmCopyTable(): Promise<void> {
     let createSql: string
     if (connection.type === 'mysql') createSql = `CREATE TABLE ${targetSql} LIKE ${sourceSql};`
     else if (connection.type === 'postgres') createSql = `CREATE TABLE ${targetSql} (LIKE ${sourceSql} INCLUDING ALL);`
+    else if (connection.type === 'sqlserver') {
+      createSql = `SELECT ${copyWithData.value ? '*' : 'TOP (0) *'} INTO ${targetSql} FROM ${sourceSql};`
+      const result = await store.executeWithApproval(connection.id, createSql, source.database)
+      if (result.status === 'ok') {
+        message.success(t('sidebar.tableCopied', { source: source.table, target: targetName }))
+        copyModalOpen.value = false
+        copySource.value = null
+        await refreshTables(connection.id, source.database)
+      } else if (result.status === 'denied') message.warning(result.error ?? '')
+      else if (result.status === 'error') message.error(result.error ?? '')
+      return
+    }
     else {
       const ddl = await window.api.getObjectDdl(connection.id, source.database, source.table, source.schema)
       const prefix = /^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)/i
@@ -551,24 +603,31 @@ async function onConnectionAction(connection: ConnectionMeta, action: string): P
 }
 function connectionOptions(connection: ConnectionMeta): DropdownOption[] {
   const connected = Boolean(store.connectedIds[connection.id])
+  const busy = Boolean(connectionActivityOf(connection.id))
   return [
-    { key: 'connect', label: t('sidebar.connect'), disabled: connected, icon: () => h(NIcon, null, { default: () => h(DatabaseOutlined) }) },
+    { key: 'connect', label: t('sidebar.connect'), disabled: connected || busy, icon: () => h(NIcon, null, { default: () => h(DatabaseOutlined) }) },
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
-    { key: 'refresh', label: t('common.refresh'), disabled: !connected, icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
-    { key: 'edit', label: t('sidebar.editConnection'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
+    { key: 'refresh', label: t('common.refresh'), disabled: !connected || busy, icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
+    { key: 'edit', label: t('sidebar.editConnection'), disabled: busy, icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
     { key: 'duplicate', label: t('sidebar.copyConnection'), disabled: duplicatingConnectionId.value !== null, icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
-    { key: 'disconnect', label: t('sidebar.disconnect'), disabled: !connected, icon: () => h(NIcon, null, { default: () => h(DisconnectOutlined) }) },
+    { key: 'disconnect', label: t('sidebar.disconnect'), disabled: !connected || busy, icon: () => h(NIcon, null, { default: () => h(DisconnectOutlined) }) },
     { type: 'divider', key: 'divider' },
-    { key: 'delete', label: t('sidebar.deleteConnection'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
+    { key: 'delete', label: t('sidebar.deleteConnection'), disabled: busy, icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
   ]
 }
-function tableOptions(tableType: 'table' | 'view'): DropdownOption[] {
+function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta): DropdownOption[] {
   const common: DropdownOption[] = [
     { key: 'open', label: t('sidebar.openTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) },
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
     { key: 'copy', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }
   ]
   if (tableType === 'view') return common
+  if (!isRelational(connection?.type)) return [
+    common[0], ...common.slice(1),
+    { key: 'export-data', label: t('sidebar.exportData'), icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }), children: [
+      { key: 'export-csv', label: t('sidebar.exportCsv') }, { key: 'export-json', label: t('sidebar.exportJson') }
+    ] }
+  ]
   return [
     common[0],
     { key: 'design', label: t('sidebar.designTable'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
@@ -654,14 +713,17 @@ function nodeOptions(node: DbTreeNode): DropdownOption[] {
   if (node.data.kind === 'savedQueryGroup') return [
     { key: 'newQuery', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) }
   ]
-  if (node.data.kind === 'database') return [
-    { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
-    { key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }
-  ]
+  if (node.data.kind === 'database') {
+    const connection = connectionOf(node.data.connectionId)
+    return [
+      { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
+      ...(isRelational(connection?.type) ? [{ key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : [])
+    ]
+  }
   if (node.data.kind === 'schema') return [{ key: 'newTable', label: t('sidebar.newTable') }]
-  if (node.data.kind === 'objectGroup') return node.data.group === 'tables' ? [{ key: 'newTable', label: t('sidebar.newTable') }] : []
+  if (node.data.kind === 'objectGroup') return node.data.group === 'tables' && isRelational(connectionOf(node.data.connectionId)?.type) ? [{ key: 'newTable', label: t('sidebar.newTable') }] : []
   if (node.data.kind === 'routine') return routineOptions()
-  return tableOptions(node.data.tableType)
+  return tableOptions(node.data.tableType, connectionOf(node.data.connectionId))
 }
 function objectGroupLabel(group: Extract<NodeData, { kind: 'objectGroup' }>['group']): string {
   return t(`sidebar.objectGroups.${group}`)
@@ -693,6 +755,7 @@ function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
   let content: ReturnType<typeof h>
   if (node.data.kind === 'connection') {
     const connection = connectionOf(node.data.connectionId)
+    const activity = connectionActivityOf(node.data.connectionId)
     const permissionTag = connection
       ? h(NTag, { type: permissionType[connection.permissionMode], size: 'tiny' }, { default: () => t(`permission.${connection.permissionMode}`) })
       : null
@@ -718,7 +781,11 @@ function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
             ])
           })
         : null
-    content = h('span', { class: 'tree-node-title', onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node) }, [connection?.name ?? '', permissionControl])
+    content = h('span', { class: 'tree-node-title', onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node) }, [
+      h('span', { class: 'connection-name', title: connection?.name ?? '' }, connection?.name ?? ''),
+      activity ? h('span', { class: 'connection-activity-status', 'aria-live': 'polite' }, t(`sidebar.${activity}`)) : null,
+      permissionControl
+    ])
   } else if (node.data.kind === 'objectGroup' || node.data.kind === 'savedQueryGroup') {
     content = h('span', {
       class: 'tree-node-title',
@@ -759,8 +826,21 @@ function renderPrefix({ option }: { option: TreeOption }): ReturnType<typeof h> 
   const node = option as DbTreeNode
   let component = DatabaseOutlined
   let color: string | undefined
-  if (node.data.kind === 'connection') { const connection = connectionOf(node.data.connectionId); color = store.connectedIds[node.data.connectionId] ? (connection?.color || '#18a058') : '#999' }
-  else if (node.data.kind === 'savedQueryGroup') component = FolderOutlined
+  if (node.data.kind === 'connection') {
+    const connection = connectionOf(node.data.connectionId)
+    if (!connection) return h(NIcon, { color: '#999' }, { default: () => h(DatabaseOutlined) })
+    const activity = connectionActivityOf(connection.id)
+    return h('span', {
+      class: 'connection-prefix-state',
+      title: activity ? t(`sidebar.${activity}`) : undefined,
+      'aria-busy': activity ? 'true' : undefined
+    }, [
+      renderConnectionTypeIcon(connection),
+      activity
+        ? h(NIcon, { class: 'connection-prefix-spinner', size: 12 }, { default: () => h(ReloadOutlined) })
+        : null
+    ])
+  } else if (node.data.kind === 'savedQueryGroup') component = FolderOutlined
   else if (node.data.kind === 'savedQuery') component = CodeOutlined
   else if (node.data.kind === 'database') component = AppstoreOutlined
   else if (node.data.kind === 'schema') component = FolderOutlined

@@ -66,8 +66,8 @@ Most database clients answer how a person can operate a database. safe db also a
 | --- | --- |
 | AI Agent CLI | Connection discovery, object browsing, single/multi-table schemas, DDL, SQL validation and execution, approval waiting |
 | Machine-readable protocol | Stable JSON output, local socket transport, explicit statuses and error codes |
-| Database connections | MySQL, PostgreSQL, and SQLite connections with connection testing |
-| SSH tunnels | MySQL / PostgreSQL jump hosts with password and private-key authentication |
+| Database connections | MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, and Redis connections with connection testing |
+| SSH tunnels | Jump hosts for every TCP database connection, with password and private-key authentication |
 | Object browser | Browse databases, schemas, tables, views, functions, and stored procedures |
 | SQL editor | Dialect-aware completion, keyboard execution, multiple tabs, and saved queries |
 | Data management | Pagination, sorting, combined filters, and row insertion, editing, and deletion |
@@ -92,11 +92,14 @@ The repository currently provides source-based development and build workflows. 
 
 ### Supported databases
 
-| Database | Objects and schemas | SQL execution | SSH tunnel | Agent CLI |
+| Database | Objects and schemas | Query execution | SSH tunnel | Agent CLI |
 | --- | --- | --- | --- | --- |
 | MySQL | ✅ | ✅ | ✅ | ✅ |
 | PostgreSQL | ✅ | ✅ | ✅ | ✅ |
 | SQLite | ✅ | ✅ | Not needed | ✅ |
+| SQL Server | ✅ | ✅ SQL | ✅ | ✅ |
+| MongoDB | ✅ Collections / sampled schemas | ✅ native JSON commands | ✅ | ✅ |
+| Redis | ✅ keys / data types | ✅ Redis CLI commands | ✅ | ✅ |
 
 ### Three connection permission modes
 
@@ -106,12 +109,12 @@ The repository currently provides source-based development and build workflows. 
 | Approval | Execute directly | Execute after confirmation | Routine maintenance and careful data corrections |
 | Full access | Execute directly | Execute directly | Local development and test databases |
 
-Permission modes can also be locked to prevent casual changes while a connection is in use. Multi-statement SQL is handled according to the highest-risk statement it contains. Statements that cannot be classified reliably are treated as writes and subject to stricter permissions.
+Permission modes can also be locked to prevent casual changes while a connection is in use. Multi-statement SQL and native command batches are handled according to the highest-risk operation they contain. Operations that cannot be classified reliably are treated as writes and subject to stricter permissions.
 
 ### A database workspace for developers
 
-- MySQL, PostgreSQL, and SQLite connections with connection testing
-- MySQL / PostgreSQL SSH jump hosts with password and private-key authentication
+- MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, and Redis connections with connection testing
+- SSH jump hosts for every TCP database connection, with password and private-key authentication
 - Browse databases, schemas, tables, views, functions, and stored procedures
 - CodeMirror SQL editor, dialect-aware completion, and `Cmd/Ctrl + Enter` execution
 - Save and organize queries by connection or database, with sanitized import and export across devices
@@ -121,21 +124,38 @@ Permission modes can also be locked to prevent casual changes while a connection
 - Export query results or table data as CSV / JSON
 - Multiple interface languages, tabs, windows, and resizable panels
 
+### MongoDB and Redis native commands
+
+The MongoDB query editor accepts one JSON database command, or a JSON array of command objects:
+
+```json
+{"find":"users","filter":{"active":true},"limit":100}
+```
+
+The Redis query editor accepts Redis CLI syntax, one command per line, including quoted arguments:
+
+```text
+GET "user:1"
+HGETALL "profile:1"
+```
+
+MongoDB collections and Redis keys can be browsed from the object tree and viewed in a read-only grid. Use native commands to modify them; those commands still pass through the Read-only / Approval / Full access pipeline. Multi-command MongoDB transactions require a replica set or sharded cluster. Redis write batches use `MULTI/EXEC`.
+
 ### Safe execution pipeline
 
-SQL from both developers and AI agents passes through the same execution pipeline:
+SQL and native commands from both developers and AI agents pass through the same execution pipeline:
 
 ```mermaid
 flowchart LR
     Human["Developer: editor / data grid / schema designer"] --> Gateway["safe db local service"]
     Agent["AI agent: safedb CLI"] --> Gateway
-    Gateway --> Split["SQL splitting and risk classification"]
+    Gateway --> Split["Statement / command splitting and risk classification"]
     Split --> Policy{"Connection permission mode"}
     Policy -->|Read-only with writes| Deny["Block and record"]
     Policy -->|Approval with writes| Confirm["One-time token confirmation"]
     Policy -->|Execution allowed| Tx["Transactional execution"]
     Confirm -->|Human confirmation in desktop app| Tx
-    Tx --> Driver["MySQL / PostgreSQL / SQLite driver"]
+    Tx --> Driver["SQL / MongoDB / Redis driver"]
     Tx --> Audit["Local operation log"]
 ```
 
@@ -157,7 +177,7 @@ npm run dev
 
 In macOS development mode, `npm run dev` automatically prepares an Electron runtime named `safe db` under `node_modules/.cache/`, so the product name is also displayed correctly in the system menu bar. This cache is not committed to version control.
 
-1. Click “New” in the sidebar and choose MySQL, PostgreSQL, or SQLite.
+1. Click “New” in the sidebar and choose MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, or Redis.
 2. Enter the connection details and choose a permission mode. Start with Read-only for production databases.
 3. Test and save the connection, then double-click it to browse database objects.
 4. Double-click a table to view its data, or right-click a connection to create a SQL query.
@@ -183,6 +203,9 @@ npm run typecheck
 
 # SQL risk-classifier tests
 npm run test:classify
+
+# MongoDB / Redis native-command classifier tests
+npm run test:native
 
 # AI Agent CLI service tests
 npm run test:agent
@@ -233,13 +256,14 @@ The default `--format json` always writes one JSON object to stdout for compatib
 
 CLI help is available in `zh-CN`, `zh-TW`, `en-US`, `ja-JP`, `ko-KR`, `de-DE`, `fr-FR`, `es-ES`, `pt-BR`, and `ru-RU`. The selection order is `--lang`, `SAFE_DB_LANG`, then the system locale; unmatched locales fall back to Simplified Chinese. `--lang` only affects `help` and `--help` text and does not change JSON protocol fields.
 
-The repository's `scripts/` directory also contains end-to-end scripts covering the UI, all three database drivers, permission approval, read-only bypass attempts, and the schema designer. Some scripts require local MySQL / PostgreSQL test instances and use Electron's CDP port in development mode.
+The repository's `scripts/` directory also contains checks covering the UI, database drivers, native-command classification, permission approval, read-only bypass attempts, and the schema designer. Some scripts require local database test instances and use Electron's CDP port in development mode.
 
 Before submitting code, run at least:
 
 ```bash
 npm run typecheck
 npm run test:classify
+npm run test:native
 npm run test:agent
 npm run test:cli
 npm run build
@@ -252,7 +276,7 @@ npm run build
 | Desktop runtime | Electron 33, electron-vite |
 | Frontend | Vue 3, TypeScript, Pinia, Vue Router |
 | UI / editor | Naive UI, CodeMirror 6 |
-| Databases | mysql2, pg, better-sqlite3 |
+| Databases | mysql2, pg, better-sqlite3, mssql, mongodb, redis |
 | Networking | ssh2 |
 | Local storage | JSON, SQLite, Electron safeStorage |
 
@@ -264,7 +288,7 @@ safe-db/
 │   ├── main/
 │   │   ├── agent/        # Agent CLI protocol, local service, and approval-request lifecycle
 │   │   ├── core/         # SQL splitting, risk classification, permission decisions, unified executor
-│   │   ├── drivers/      # MySQL / PostgreSQL / SQLite drivers
+│   │   ├── drivers/      # SQL Server / MySQL / PostgreSQL / SQLite / MongoDB / Redis drivers
 │   │   ├── ssh/          # SSH tunnel lifecycle
 │   │   ├── store/        # Connections, saved queries, and operation logs
 │   │   └── ipc.ts        # Main-process IPC entry point

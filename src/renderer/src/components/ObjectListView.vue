@@ -41,6 +41,8 @@ const queryRows = computed<ObjectRow[]>(() => store.savedQueries
   })))
 const rows = computed(() => props.tab.objectGroup === 'queries' ? queryRows.value : loadedRows.value)
 const selectedRow = computed(() => rows.value.find((row) => row.key === selectedKey.value))
+const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
+const supportsStructure = computed(() => connection.value?.type !== 'mongodb' && connection.value?.type !== 'redis')
 const filteredRows = computed(() => {
   const value = keyword.value.trim().toLocaleLowerCase()
   if (!value) return rows.value
@@ -122,7 +124,7 @@ function openRow(row: ObjectRow): void {
 }
 function openSelected(): void { if (selectedRow.value) openRow(selectedRow.value) }
 function createObject(): void {
-  if (props.tab.objectGroup === 'tables') {
+  if (props.tab.objectGroup === 'tables' && supportsStructure.value) {
     store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: props.tab.connectionId, database: props.tab.database, schema: props.tab.schema })
   } else if (props.tab.objectGroup === 'queries' && props.tab.connectionId) {
     const connectionName = store.connections.find((item) => item.id === props.tab.connectionId)?.name ?? ''
@@ -134,7 +136,7 @@ function createObject(): void {
 }
 function designSelected(): void {
   const row = selectedRow.value
-  if (!row?.table || row.table.type !== 'table') return
+  if (!supportsStructure.value || !row?.table || row.table.type !== 'table') return
   store.openTab({ type: 'structure', title: t('sidebar.designTitle', { name: row.table.name }), connectionId: props.tab.connectionId, database: props.tab.database, schema: row.table.schema, table: row.table.name })
 }
 onMounted(load)
@@ -144,9 +146,9 @@ onMounted(load)
   <div class="module-page object-list-page">
     <div class="module-toolbar object-list-toolbar">
       <span class="object-toolbar-actions">
-        <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!['tables', 'queries'].includes(tab.objectGroup ?? '')" @click="createObject"><template #icon><NIcon><PlusOutlined /></NIcon></template></NButton></template>{{ t(tab.objectGroup === 'queries' ? 'sidebar.newQuery' : 'sidebar.newTable') }}</NTooltip>
+        <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!['tables', 'queries'].includes(tab.objectGroup ?? '') || (tab.objectGroup === 'tables' && !supportsStructure)" @click="createObject"><template #icon><NIcon><PlusOutlined /></NIcon></template></NButton></template>{{ t(tab.objectGroup === 'queries' ? 'sidebar.newQuery' : 'sidebar.newTable') }}</NTooltip>
         <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!selectedRow" @click="openSelected"><template #icon><NIcon><FolderOpenOutlined /></NIcon></template></NButton></template>{{ t('objectList.open') }}</NTooltip>
-        <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!selectedRow?.table || selectedRow.table.type !== 'table'" @click="designSelected"><template #icon><NIcon><EditOutlined /></NIcon></template></NButton></template>{{ t('sidebar.designTable') }}</NTooltip>
+        <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!supportsStructure || !selectedRow?.table || selectedRow.table.type !== 'table'" @click="designSelected"><template #icon><NIcon><EditOutlined /></NIcon></template></NButton></template>{{ t('sidebar.designTable') }}</NTooltip>
         <span class="object-toolbar-separator" />
         <NTooltip><template #trigger><NButton quaternary size="small" :loading="loading" :disabled="tab.objectGroup === 'queries'" @click="load"><template #icon><NIcon><ReloadOutlined /></NIcon></template></NButton></template>{{ t('common.refresh') }}</NTooltip>
       </span>

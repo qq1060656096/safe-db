@@ -63,11 +63,13 @@ export function registerIpcHandlers(
     return meta
   })
 
-  ipcMain.handle('connections:delete', async (event, id: string) => {
-    await drivers.invalidate(id)
+  ipcMain.handle('connections:delete', (event, id: string) => {
     connections.delete(id)
     queries.deleteByConnection(id)
+    // 删除本地配置不等待远程连接优雅关闭；后台清理只作用于被删除的连接。
+    const disconnecting = drivers.invalidate(id)
     notifyOtherWindows(event, 'all')
+    void disconnecting.catch(() => {})
   })
 
   // ---- 保存的查询 ----
@@ -253,6 +255,8 @@ export function registerIpcHandlers(
   ipcMain.handle('exec:sql', (_e, id: string, sql: string, database?: string) =>
     executor.execute(id, sql, database)
   )
+
+  ipcMain.handle('exec:cancel', (_e, id: string) => drivers.cancel(id))
 
   ipcMain.handle('exec:confirm', (_e, token: string) => executor.confirmExecute(token))
 

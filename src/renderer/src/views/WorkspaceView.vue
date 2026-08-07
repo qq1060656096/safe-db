@@ -14,6 +14,7 @@ import RightPanel from '../components/RightPanel.vue'
 import Sidebar from '../components/Sidebar.vue'
 import StructureDesigner from '../components/StructureDesigner.vue'
 import { useAppStore } from '../stores/app'
+import { invalidateConnectionMetadata } from '../metadataCache'
 
 const store = useAppStore()
 const route = useRoute()
@@ -38,6 +39,7 @@ const leftWidth = ref(readPanelWidth(LEFT_WIDTH_KEY, window.innerWidth <= 1000 ?
 const rightWidth = ref(readPanelWidth(RIGHT_WIDTH_KEY, window.innerWidth <= 1000 ? 220 : 280, MIN_RIGHT_WIDTH, MAX_RIGHT_WIDTH))
 const resizingSide = ref<'left' | 'right' | null>(null)
 let stopDataChangedListener: (() => void) | null = null
+let stopMetadataChangedListener: (() => void) | null = null
 const hasApi = computed(() => typeof window.api !== 'undefined')
 const activeTitle = computed(() => store.tabs.find((tab) => tab.id === store.activeTabId)?.title ?? t('app.name'))
 const panelStyle = computed<Record<string, string>>(() => ({
@@ -139,12 +141,18 @@ onMounted(async () => {
     if (resource === 'queries' || resource === 'all') loads.push(store.loadSavedQueries())
     void Promise.all(loads).catch((error) => message.error(error instanceof Error ? error.message : String(error)))
   })
+  // 开发模式主进程尚未重启时兼容旧 preload；正式构建始终提供该事件。
+  if (typeof window.api.onMetadataChanged === 'function') {
+    stopMetadataChangedListener = window.api.onMetadataChanged((connectionId) => invalidateConnectionMetadata(connectionId))
+  }
   try { await Promise.all([store.loadConnections(), store.loadSavedQueries()]) }
   catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
 })
 onBeforeUnmount(() => {
   stopDataChangedListener?.()
   stopDataChangedListener = null
+  stopMetadataChangedListener?.()
+  stopMetadataChangedListener = null
   stopResize()
   window.removeEventListener('resize', normalizePanelWidths)
 })

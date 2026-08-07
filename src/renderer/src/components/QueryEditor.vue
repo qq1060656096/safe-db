@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, SaveOutlined } from '@vicons/antd'
-import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTooltip, useMessage, type SelectOption } from 'naive-ui'
+import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
+import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useMessage, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { ConnectionMeta, ExecuteResponse, TableInfo } from '../../../shared/types'
+import type { ConnectionMeta, ExecuteResponse } from '../../../shared/types'
+import {
+  connectionMetadataRevision,
+  loadColumnMetadata,
+  loadDatabaseMetadata,
+  loadTableMetadata
+} from '../metadataCache'
 import type { SqlCompletionCatalog, SqlCompletionTable } from '../sqlCompletion'
 import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
@@ -15,9 +21,13 @@ const store = useAppStore()
 const { t } = useI18n()
 const message = useMessage()
 const value = ref(props.tab.sql ?? '')
+const sqlEditor = ref<{ getSelectedText: () => string } | null>(null)
 const executedSql = ref('')
 const response = ref<ExecuteResponse | null>(null)
+const activeResultIndex = ref(0)
 const running = ref(false)
+const stopping = ref(false)
+const stopStatus = ref<'stopping' | 'stopped' | null>(null)
 const queryPage = ref<HTMLElement | null>(null)
 const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
 const completion = ref<SqlCompletionCatalog>({ tables: [] })
@@ -33,7 +43,11 @@ const saving = ref(false)
 const savedQuery = computed(() => store.savedQueries.find((query) => query.id === props.tab.savedQueryId))
 const saveConnectionOptions = computed<SelectOption[]>(() => store.connections.map((item) => ({ label: item.name, value: item.id })))
 const saveConnection = computed(() => store.connections.find((item) => item.id === savedConnectionId.value))
+const editorPlaceholder = computed(() => connection.value?.type === 'mongodb'
+  ? t('query.mongodbPlaceholder')
+  : connection.value?.type === 'redis' ? t('query.redisPlaceholder') : t('query.placeholder'))
 let saveDatabaseRequestId = 0
+let databaseOptionsRequestId = 0
 const EDITOR_HEIGHT_KEY = 'safe-db.query.editor-height'
 const MIN_EDITOR_HEIGHT = 96
 const MAX_EDITOR_HEIGHT = 640
@@ -46,6 +60,7 @@ const editorHeight = ref(Number.isFinite(parsedEditorHeight)
 const editorResizing = ref(false)
 let editorResizeStartY = 0
 let editorResizeStartHeight = 0
+let runGeneration = 0
 
 function maximumEditorHeight(): number {
   const page = queryPage.value
@@ -105,98 +120,41 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', normalizeEditorHeight)
 })
 
-interface CompletionData {
-  databases: string[]
-  tables: SqlCompletionTable[]
+async function refreshDatabaseOptions(clear = false): Promise<void> {
+  const requestId = ++databaseOptionsRequestId
+  const current = connection.value
+  if (clear) databaseOptions.value = []
+  if (!current) { databasesLoading.value = false; return }
+  databasesLoading.value = true
+  try {
+    const databases = await loadDatabaseMetadata(current.id)
+    if (requestId !== databaseOptionsRequestId || connection.value?.id !== current.id) return
+    databaseOptions.value = databases.map((database) => ({ label: database, value: database }))
+    completion.value = { ...completion.value, databases }
+    const preferred = props.tab.database ?? current.database ?? (current.type === 'sqlite' ? 'main' : current.type === 'redis' ? '0' : undefined)
+    if (preferred && databases.includes(preferred) && props.tab.database !== preferred) {
+      store.setTabDatabase(props.tab.id, preferred)
+    }
+  } catch (error) {
+    if (requestId === databaseOptionsRequestId) message.error(t('query.databasesLoadFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    if (requestId === databaseOptionsRequestId) databasesLoading.value = false
+  }
 }
 
-const completionRequests = new Map<string, Promise<CompletionData>>()
-const completionColumnRequests = new Map<string, Promise<SqlCompletionTable['columns']>>()
+function onDatabaseSelectShow(show: boolean): void {
+  // 展开时重新经过 TTL 校验；有效缓存立即复用，过期缓存才访问数据库。
+  if (show) void refreshDatabaseOptions()
+}
 
 watch(
-  () => connection.value,
-  async (current, _previous, onCleanup) => {
-    databaseOptions.value = []
-    if (!current) return
-    let canceled = false
-    onCleanup(() => { canceled = true })
-    databasesLoading.value = true
-    try {
-      const databases = await window.api.listDatabases(current.id)
-      if (canceled) return
-      databaseOptions.value = databases.map((database) => ({ label: database, value: database }))
-      const preferred = props.tab.database ?? current.database ?? (current.type === 'sqlite' ? 'main' : undefined)
-      if (preferred && databases.includes(preferred) && props.tab.database !== preferred) {
-        store.setTabDatabase(props.tab.id, preferred)
-      }
-    } catch (error) {
-      if (!canceled) message.error(t('query.databasesLoadFailed', { error: error instanceof Error ? error.message : String(error) }))
-    } finally {
-      if (!canceled) databasesLoading.value = false
-    }
-  },
+  [() => connection.value, () => connectionMetadataRevision(connection.value?.id)],
+  () => { void refreshDatabaseOptions(true) },
   { immediate: true }
 )
 
-async function mapConcurrent<T, R>(items: T[], concurrency: number, task: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  async function worker(): Promise<void> {
-    while (next < items.length) {
-      const index = next++
-      results[index] = await task(items[index])
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
-  return results
-}
-
-async function fetchCompletionData(connection: ConnectionMeta, database?: string): Promise<CompletionData> {
-  const tablesWithDatabase: (TableInfo & { database?: string })[] = []
-  let databases = database ? [database] : []
-
-  if (connection.type === 'mysql' && !database) {
-    databases = await window.api.listDatabases(connection.id)
-    const groups = await mapConcurrent(databases, 3, async (name) => {
-      try {
-        return (await window.api.listTables(connection.id, name)).map((table) => ({ ...table, database: name }))
-      } catch {
-        return []
-      }
-    })
-    tablesWithDatabase.push(...groups.flat())
-  } else {
-    const targetDatabase = database ?? (connection.type === 'sqlite' ? 'main' : undefined)
-    const tables = await window.api.listTables(connection.id, targetDatabase)
-    tablesWithDatabase.push(...tables.map((table) => ({ ...table, database: targetDatabase })))
-    if (targetDatabase && !databases.includes(targetDatabase)) databases.push(targetDatabase)
-  }
-
-  const tables = tablesWithDatabase.map((table): SqlCompletionTable => ({
-    name: table.name,
-    type: table.type,
-    database: table.database,
-    schema: table.schema,
-    comment: table.comment,
-    columns: []
-  }))
-  return { databases, tables }
-}
-
-function completionData(connection: ConnectionMeta, database?: string): Promise<CompletionData> {
-  const key = `${connection.id}:${database ?? ''}`
-  const existing = completionRequests.get(key)
-  if (existing) return existing
-  const request = fetchCompletionData(connection, database).finally(() => completionRequests.delete(key))
-  completionRequests.set(key, request)
-  return request
-}
-
 function completionColumns(connection: ConnectionMeta, table: SqlCompletionTable): Promise<SqlCompletionTable['columns']> {
-  const key = `${connection.id}:${table.database ?? ''}:${table.schema ?? ''}:${table.name}`
-  const existing = completionColumnRequests.get(key)
-  if (existing) return existing
-  const request = window.api.listColumns(connection.id, table.database, table.name, table.schema)
+  return loadColumnMetadata(connection.id, table.database, table.name, table.schema)
     .then((columns) => columns.map((column) => ({
       name: column.name,
       dataType: column.dataType,
@@ -204,29 +162,41 @@ function completionColumns(connection: ConnectionMeta, table: SqlCompletionTable
       comment: column.comment
     })))
     .catch(() => [])
-  completionColumnRequests.set(key, request)
-  return request
 }
 
 watch(
-  [() => connection.value, () => props.tab.database, () => props.tab.schema],
+  [() => connection.value, () => props.tab.database, () => props.tab.schema, () => connectionMetadataRevision(connection.value?.id)],
   async ([currentConnection, tabDatabase, tabSchema], _previous, onCleanup) => {
     const current = currentConnection as ConnectionMeta | undefined
-    const database = (tabDatabase as string | undefined) ?? current?.database ?? (current?.type === 'sqlite' ? 'main' : undefined)
+    const database = (tabDatabase as string | undefined) ?? current?.database ?? (current?.type === 'sqlite' ? 'main' : current?.type === 'redis' ? '0' : undefined)
     let canceled = false
     onCleanup(() => { canceled = true })
     completion.value = {
       dbType: current?.type,
       database,
-      defaultSchema: (tabSchema as string | undefined) ?? (current?.type === 'postgres' ? 'public' : undefined),
+      defaultSchema: (tabSchema as string | undefined) ?? (current?.type === 'postgres' ? 'public' : current?.type === 'sqlserver' ? 'dbo' : undefined),
       databases: database ? [database] : [],
       tables: [],
       loadColumns: current ? (table) => completionColumns(current, table) : undefined
     }
-    if (!current) return
+    // 连接级查询只加载数据库名；选定数据库后才加载该库的表，避免遍历全部库。
+    if (!current || current.type === 'mongodb' || !database) return
     try {
-      const data = await completionData(current, database)
-      if (!canceled) completion.value = { ...completion.value, ...data }
+      // 数据库下拉框复用同一请求并先完成；提示元数据不会抢在它前面占用连接。
+      await loadDatabaseMetadata(current.id).catch(() => [])
+      if (canceled) return
+      const tables = await loadTableMetadata(current.id, database)
+      if (!canceled) completion.value = {
+        ...completion.value,
+        tables: tables.map((table): SqlCompletionTable => ({
+          name: table.name,
+          type: table.type,
+          database,
+          schema: table.schema,
+          comment: table.comment,
+          columns: []
+        }))
+      }
     } catch {
       // 元数据提示加载失败不影响 SQL 编辑和执行，关键字、函数提示仍然可用。
     }
@@ -234,18 +204,45 @@ watch(
   { immediate: true }
 )
 
-async function run(): Promise<void> {
-  const sqlText = value.value.trim()
+async function run(selectedSql?: string): Promise<void> {
+  if (running.value || stopping.value) return
+  const selection = typeof selectedSql === 'string' ? selectedSql : sqlEditor.value?.getSelectedText() ?? ''
+  const sqlText = (selection.trim() || value.value.trim())
   if (!sqlText || !props.tab.connectionId) return
   executedSql.value = sqlText
+  const generation = ++runGeneration
   running.value = true
+  stopStatus.value = null
   try {
     const result = await store.executeWithApproval(props.tab.connectionId, sqlText, props.tab.database)
+    if (generation !== runGeneration) return
     response.value = result
+    if (result.status === 'ok') activeResultIndex.value = 0
     if (result.status === 'denied') message.warning(result.error ?? '')
     else if (result.status === 'error') message.error(result.error ?? '')
   } finally {
+    if (generation === runGeneration) running.value = false
+  }
+}
+
+async function stop(): Promise<void> {
+  const connectionId = props.tab.connectionId
+  if (!connectionId || !running.value || stopping.value) return
+  runGeneration++
+  stopping.value = true
+  stopStatus.value = 'stopping'
+  response.value = null
+  try {
+    const approvalCanceled = await store.cancelPendingQueryApproval(connectionId)
+    if (!approvalCanceled) await window.api.cancelSql(connectionId)
+    stopStatus.value = 'stopped'
+    message.info(t('query.stopped'))
+  } catch (error) {
+    stopStatus.value = null
+    message.error(t('query.stopFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
     running.value = false
+    stopping.value = false
   }
 }
 
@@ -253,6 +250,8 @@ function clear(): void {
   value.value = ''
   executedSql.value = ''
   response.value = null
+  activeResultIndex.value = 0
+  stopStatus.value = null
 }
 
 function selectDatabase(database: string | null): void {
@@ -265,7 +264,7 @@ async function loadSaveDatabases(connectionId: string, keepSelection = false): P
   if (!connectionId) return
   saveDatabasesLoading.value = true
   try {
-    const databases = await window.api.listDatabases(connectionId)
+    const databases = await loadDatabaseMetadata(connectionId)
     if (requestId !== saveDatabaseRequestId || savedConnectionId.value !== connectionId) return
     saveDatabaseOptions.value = databases.map((database) => ({ label: database, value: database }))
     if (!keepSelection || (savedDatabase.value && !databases.includes(savedDatabase.value))) savedDatabase.value = null
@@ -318,9 +317,13 @@ async function saveCurrentQuery(): Promise<void> {
 <template>
   <div ref="queryPage" class="module-page query-editor-page">
     <div class="module-toolbar">
-      <NButton type="primary" size="small" :loading="running" @click="run">
+      <NButton type="primary" size="small" :loading="running" :disabled="stopping" :title="t('query.runSelectionHelp')" @click="run()">
         <template #icon><NIcon><CaretRightOutlined /></NIcon></template>
         {{ t('query.run') }}
+      </NButton>
+      <NButton type="error" secondary size="small" :disabled="!running || stopping" :loading="stopping" @click="stop">
+        <template #icon><NIcon><StopOutlined /></NIcon></template>
+        {{ t('query.stop') }}
       </NButton>
       <NButton size="small" :disabled="!value.trim()" @click="openSaveDialog">
         <template #icon><NIcon><SaveOutlined /></NIcon></template>
@@ -337,6 +340,7 @@ async function saveCurrentQuery(): Promise<void> {
         :options="databaseOptions"
         :placeholder="t('query.selectDatabase')"
         @update:value="selectDatabase"
+        @update:show="onDatabaseSelectShow"
       />
       <NTooltip trigger="hover"><template #trigger><span class="keyboard-hint">⌘⏎</span></template>Cmd/Ctrl + Enter</NTooltip>
       <NTooltip trigger="hover"><template #trigger><span class="keyboard-hint">⌃Space</span></template>{{ t('query.completionShortcut') }}</NTooltip>
@@ -348,7 +352,7 @@ async function saveCurrentQuery(): Promise<void> {
         <template v-if="response?.durationMs !== undefined"> · {{ t('common.duration', { value: response.durationMs }) }}</template>
       </span>
     </div>
-    <div class="editor-wrap" :style="{ height: `${editorHeight}px` }"><SqlEditor v-model="value" :placeholder="t('query.placeholder')" :completion="completion" @run="run" /></div>
+    <div class="editor-wrap" :style="{ height: `${editorHeight}px` }"><SqlEditor ref="sqlEditor" v-model="value" :placeholder="editorPlaceholder" :completion="completion" @run="run" /></div>
     <div
       class="query-editor-resizer"
       :class="{ active: editorResizing }"
@@ -363,22 +367,24 @@ async function saveCurrentQuery(): Promise<void> {
       @keydown="resizeEditorWithKeyboard"
     />
     <div class="query-results">
-      <NAlert v-if="response?.status === 'denied'" type="warning" class="response-alert">{{ response.error }}</NAlert>
+      <NAlert v-if="stopStatus" type="info" class="response-alert">{{ t(stopStatus === 'stopping' ? 'query.stopping' : 'query.stopped') }}</NAlert>
+      <NAlert v-else-if="response?.status === 'denied'" type="warning" class="response-alert">{{ response.error }}</NAlert>
       <NAlert v-else-if="response?.status === 'error'" type="error" :title="t('query.failed')" class="response-alert">{{ response.error }}</NAlert>
       <template v-else-if="response?.status === 'ok'">
-        <template v-if="response.results?.length">
-          <QueryResultView
-            v-for="(result, index) in response.results"
-            :key="index"
-            :result="result"
-            :index="index"
-            :connection-id="tab.connectionId"
-            :db-type="connection?.type"
-            :database="tab.database"
-            :schema="tab.schema"
-            :sql="executedSql"
-          />
-        </template>
+        <NTabs v-if="response.results?.length" v-model:value="activeResultIndex" type="line" size="small" class="query-result-tabs">
+          <NTabPane v-for="(result, index) in response.results" :key="index" :name="index" display-directive="show:lazy">
+            <template #tab>{{ t('query.resultTab', { index: index + 1 }) }}</template>
+            <QueryResultView
+              :result="result"
+              :index="index"
+              :connection-id="tab.connectionId"
+              :db-type="connection?.type"
+              :database="tab.database"
+              :schema="tab.schema"
+              :sql="executedSql"
+            />
+          </NTabPane>
+        </NTabs>
         <div v-else class="empty-result">{{ t('query.noResult') }}</div>
       </template>
     </div>
