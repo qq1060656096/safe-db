@@ -147,6 +147,21 @@ export const useAppStore = defineStore('app', {
       this.activeTabId = id
       return id
     },
+    openSavedQuery(query: SavedQuery): string {
+      const existing = this.tabs.find((tab) => tab.type === 'query' && tab.savedQueryId === query.id)
+      if (existing) {
+        this.activeTabId = existing.id
+        return existing.id
+      }
+      return this.openTab({
+        type: 'query',
+        title: query.name,
+        connectionId: query.connectionId,
+        database: query.database,
+        sql: query.sql,
+        savedQueryId: query.id
+      })
+    },
     closeTab(id: string): void {
       const index = this.tabs.findIndex((tab) => tab.id === id)
       this.tabs = this.tabs.filter((tab) => tab.id !== id)

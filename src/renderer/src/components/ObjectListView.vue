@@ -111,7 +111,7 @@ async function load(): Promise<void> {
 
 function openRow(row: ObjectRow): void {
   if (row.kind === 'query' && row.query) {
-    store.openTab({ type: 'query', title: row.query.name, connectionId: row.query.connectionId, database: row.query.database, sql: row.query.sql, savedQueryId: row.query.id })
+    store.openSavedQuery(row.query)
   } else if (row.kind === 'routine' && row.routine) {
     store.openTab({
       type: 'query', title: t('sidebar.routineTitle', { name: row.routine.name }), connectionId: props.tab.connectionId,

@@ -332,7 +332,7 @@ function onNodeDoubleClick(event: MouseEvent, node: DbTreeNode): void {
   } else void toggleNodeExpanded(node)
 }
 function openSavedQuery(query: SavedQuery): void {
-  store.openTab({ type: 'query', title: query.name, connectionId: query.connectionId, database: query.database, sql: query.sql, savedQueryId: query.id })
+  store.openSavedQuery(query)
 }
 function openTable(node: Extract<NodeData, { kind: 'table' }>): void {
   store.openTab({ type: 'table', title: node.table, connectionId: node.connectionId, database: node.database, schema: node.schema, table: node.table })

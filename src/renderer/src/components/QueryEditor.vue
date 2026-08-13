@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
+import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
 import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useMessage, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
@@ -268,6 +268,17 @@ function clear(): void {
   stopStatus.value = null
 }
 
+function createQueryFromCurrent(): void {
+  if (!props.tab.connectionId) return
+  const location = props.tab.database ?? connection.value?.name ?? ''
+  store.openTab({
+    type: 'query',
+    title: t('sidebar.queryTitle', { name: location }),
+    connectionId: props.tab.connectionId,
+    database: props.tab.database
+  })
+}
+
 function selectDatabase(database: string | null): void {
   store.setTabDatabase(props.tab.id, database ?? undefined)
 }
@@ -353,6 +364,10 @@ async function requestSave(): Promise<void> {
 <template>
   <div ref="queryPage" class="module-page query-editor-page">
     <div class="module-toolbar">
+      <NButton size="small" :disabled="!tab.connectionId" @click="createQueryFromCurrent">
+        <template #icon><NIcon><PlusOutlined /></NIcon></template>
+        {{ t('sidebar.newQuery') }}
+      </NButton>
       <NButton type="primary" size="small" :loading="running" :disabled="stopping" :title="t('query.runSelectionHelp')" @click="run()">
         <template #icon><NIcon><CaretRightOutlined /></NIcon></template>
         {{ t('query.run') }}
