@@ -1,6 +1,8 @@
 import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
-import { readFile, writeFile } from 'node:fs/promises'
-import { basename, extname } from 'node:path'
+import { constants as fsConstants } from 'node:fs'
+import { access, open, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { basename, extname, join, resolve } from 'node:path'
+import Database from 'better-sqlite3'
 import type {
   AuditFilter,
   ConnectionConfig,
@@ -21,6 +23,101 @@ export interface IpcDeps {
   audit: AuditStore
   drivers: DriverManager
   executor: Executor
+}
+
+function normalizedSqliteDatabaseName(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) throw new Error('请输入数据库名称')
+  if (trimmed === '.' || trimmed === '..' || trimmed.includes('\0') || /[\\/]/.test(trimmed)) {
+    throw new Error('数据库名称不能包含路径或路径分隔符')
+  }
+  if (/(?:-wal|-shm|-journal)$/i.test(trimmed)) {
+    throw new Error('不能将 SQLite 伴随文件作为数据库名称')
+  }
+  return extname(trimmed) ? trimmed : `${trimmed}.db`
+}
+
+async function assertExistingSqliteFile(filePath: string): Promise<void> {
+  const info = await stat(filePath).catch(() => null)
+  if (!info?.isFile()) throw new Error('所选 SQLite 数据库文件不存在或不是普通文件')
+  const db = new Database(filePath, { readonly: true, fileMustExist: true })
+  try {
+    db.pragma('schema_version', { simple: true })
+  } finally {
+    db.close()
+  }
+}
+
+async function sqliteConfigForSave(
+  cfg: ConnectionConfig
+): Promise<{ config: ConnectionConfig; createdFile: string | null }> {
+  const { sqliteCreate, ...persistentConfig } = cfg
+  if (cfg.type !== 'sqlite') return { config: persistentConfig, createdFile: null }
+
+  if (!sqliteCreate) {
+    const filePath = cfg.filePath?.trim()
+    if (!filePath) throw new Error('请选择 SQLite 数据库文件')
+    await assertExistingSqliteFile(filePath)
+    return { config: { ...persistentConfig, filePath }, createdFile: null }
+  }
+
+  const rawDirectory = sqliteCreate.directory.trim()
+  if (!rawDirectory) throw new Error('请选择数据库目录')
+  const directory = resolve(rawDirectory)
+  const directoryInfo = await stat(directory).catch(() => null)
+  if (!directoryInfo?.isDirectory()) throw new Error('所选数据库目录不存在或不是目录')
+  await access(directory, fsConstants.W_OK)
+
+  const databaseName = normalizedSqliteDatabaseName(sqliteCreate.databaseName)
+  const filePath = join(directory, databaseName)
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  let createdByThisCall = false
+  try {
+    // wx 原子地拒绝同名文件，避免“检查后到创建前”被其他进程抢占而发生覆盖。
+    handle = await open(filePath, 'wx')
+    createdByThisCall = true
+    await handle.close()
+    handle = undefined
+    const db = new Database(filePath, { fileMustExist: true })
+    try {
+      // 显式初始化数据库页，使新文件立即成为可验证的 SQLite 数据库。
+      db.exec('VACUUM')
+    } finally {
+      db.close()
+    }
+  } catch (error) {
+    await handle?.close().catch(() => {})
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`数据库文件“${databaseName}”已存在，请选择该文件连接或修改数据库名称`)
+    }
+    // 仅清理由本次流程刚刚创建、但未能初始化成功的文件。
+    if (createdByThisCall) await unlink(filePath).catch(() => {})
+    throw error
+  }
+
+  return {
+    config: { ...persistentConfig, filePath },
+    createdFile: filePath
+  }
+}
+
+async function testSqliteConfig(cfg: ConnectionConfig): Promise<void> {
+  if (!cfg.sqliteCreate) {
+    const filePath = cfg.filePath?.trim()
+    if (!filePath) throw new Error('请选择 SQLite 数据库文件')
+    await assertExistingSqliteFile(filePath)
+    return
+  }
+  const rawDirectory = cfg.sqliteCreate.directory.trim()
+  if (!rawDirectory) throw new Error('请选择数据库目录')
+  const directory = resolve(rawDirectory)
+  const directoryInfo = await stat(directory).catch(() => null)
+  if (!directoryInfo?.isDirectory()) throw new Error('所选数据库目录不存在或不是目录')
+  await access(directory, fsConstants.W_OK)
+  const databaseName = normalizedSqliteDatabaseName(cfg.sqliteCreate.databaseName)
+  const filePath = join(directory, databaseName)
+  const targetInfo = await stat(filePath).catch(() => null)
+  if (targetInfo) throw new Error(`数据库文件“${databaseName}”已存在，请选择该文件连接或修改数据库名称`)
 }
 
 export function registerIpcHandlers(
@@ -50,7 +147,15 @@ export function registerIpcHandlers(
   ipcMain.handle('connections:list', () => connections.list())
 
   ipcMain.handle('connections:save', async (event, cfg: ConnectionConfig) => {
-    const meta = connections.save(cfg)
+    const { config, createdFile } = await sqliteConfigForSave(cfg)
+    let meta
+    try {
+      meta = connections.save(config)
+    } catch (error) {
+      // 配置持久化失败时回滚本次新建的数据库，不遗留一个用户未保存的空库。
+      if (createdFile) await unlink(createdFile).catch(() => {})
+      throw error
+    }
     // 配置可能已变化,重建驱动
     await drivers.invalidate(meta.id)
     notifyOtherWindows(event, 'connections')
@@ -88,9 +193,13 @@ export function registerIpcHandlers(
     let tunnel: TunnelHandle | null = null
     try {
       const merged = connections.mergePasswordForTest(cfg)
+      if (merged.type === 'sqlite') {
+        await testSqliteConfig(merged)
+        return { ok: true }
+      }
       // SSH 隧道:先起一条临时隧道,测试完即关
       let endpoint: { host: string; port: number } | undefined
-      if (merged.type !== 'sqlite' && merged.ssh?.enabled) {
+      if (merged.ssh?.enabled) {
         tunnel = await establishTunnel(merged)
         endpoint = { host: '127.0.0.1', port: tunnel.localPort }
       }
@@ -153,18 +262,24 @@ export function registerIpcHandlers(
     return { ...connectionResult, ...queryResult, canceled: false }
   })
 
-  ipcMain.handle('connections:pickSqliteFile', async (event) => {
+  ipcMain.handle('connections:pickSqlitePath', async (event) => {
     const win = senderWindow(event)
     if (!win) return null
     const res = await dialog.showOpenDialog(win, {
-      title: '选择 SQLite 数据库文件',
-      properties: ['openFile', 'createDirectory'],
+      title: '选择 SQLite 数据库文件或目录',
+      properties: ['openFile', 'openDirectory', 'createDirectory'],
       filters: [
         { name: 'SQLite 数据库', extensions: ['db', 'sqlite', 'sqlite3'] },
         { name: '所有文件', extensions: ['*'] }
       ]
     })
-    return res.canceled ? null : (res.filePaths[0] ?? null)
+    const selectedPath = res.filePaths[0]
+    if (res.canceled || !selectedPath) return null
+    const selectedInfo = await stat(selectedPath)
+    if (!selectedInfo.isFile() && !selectedInfo.isDirectory()) {
+      throw new Error('请选择 SQLite 数据库文件或目录')
+    }
+    return { path: selectedPath, kind: selectedInfo.isDirectory() ? 'directory' : 'file' }
   })
 
   ipcMain.handle(

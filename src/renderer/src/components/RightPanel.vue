@@ -11,6 +11,7 @@ const { t } = useI18n()
 const message = useMessage()
 const activeTab = computed(() => store.tabs.find((tab) => tab.id === store.activeTabId))
 const connection = computed(() => store.connections.find((item) => item.id === activeTab.value?.connectionId))
+const savedQuery = computed(() => store.savedQueries.find((query) => query.id === activeTab.value?.savedQueryId))
 const permissionType = computed<'info' | 'warning' | 'success'>(() => {
   if (connection.value?.permissionMode === 'approval') return 'warning'
   if (connection.value?.permissionMode === 'full') return 'success'
@@ -21,6 +22,11 @@ const ddl = ref('')
 const ddlError = ref('')
 const ddlLoading = ref(false)
 let ddlRequestId = 0
+
+function formatDate(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
 
 function quoteIdentifier(connection: ConnectionMeta, name: string): string {
   if (connection.type === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
@@ -227,6 +233,9 @@ function openAudit(): void {
             <div v-if="activeTab.routine"><dt>{{ t('panel.routine') }}</dt><dd>{{ activeTab.routine }}<template v-if="activeTab.routineArguments !== undefined">({{ activeTab.routineArguments }})</template></dd></div>
             <div v-if="activeTab.routineType"><dt>{{ t('panel.routineType') }}</dt><dd>{{ t(`sidebar.routineTypes.${activeTab.routineType}`) }}</dd></div>
             <div v-if="connection"><dt>{{ t('panel.permission') }}</dt><dd><NTag size="small" :type="permissionType">{{ t(`permission.${connection.permissionMode}`) }}</NTag></dd></div>
+            <div v-if="activeTab.type === 'query'"><dt>{{ t('panel.queryState') }}</dt><dd><NTag size="small" :type="activeTab.savedQueryId ? 'success' : 'default'">{{ t(activeTab.savedQueryId ? 'panel.savedQuery' : 'panel.temporaryQuery') }}</NTag></dd></div>
+            <div v-if="activeTab.type === 'query'"><dt>{{ t('panel.modificationState') }}</dt><dd><NTag size="small" :type="activeTab.dirty ? 'warning' : 'default'">{{ t(activeTab.dirty ? 'query.modified' : 'query.unmodified') }}</NTag></dd></div>
+            <div v-if="savedQuery"><dt>{{ t('panel.updatedAt') }}</dt><dd>{{ formatDate(savedQuery.updatedAt) }}</dd></div>
           </dl>
         </section>
         <section v-if="activeTab.table || activeTab.routine" class="ddl-section">

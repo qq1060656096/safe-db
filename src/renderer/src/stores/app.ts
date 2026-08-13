@@ -188,6 +188,16 @@ export const useAppStore = defineStore('app', {
       this.closeTabs(this.tabs.filter((tab) => tab.id !== id).map((tab) => tab.id))
       this.activeTabId = id
     },
+    closeOtherSavedQueryTabs(id: string): void {
+      this.closeTabs(this.tabs
+        .filter((tab) => tab.id !== id && tab.type === 'query' && Boolean(tab.savedQueryId) && !tab.dirty)
+        .map((tab) => tab.id))
+    },
+    closeUnmodifiedQueryTabs(): void {
+      this.closeTabs(this.tabs
+        .filter((tab) => tab.type === 'query' && !tab.dirty)
+        .map((tab) => tab.id))
+    },
     closeAllTabs(): void {
       this.tabs = []
       this.activeTabId = null

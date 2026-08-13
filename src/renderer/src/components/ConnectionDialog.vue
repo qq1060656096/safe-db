@@ -27,6 +27,9 @@ interface FormValues {
   encrypt: boolean
   trustServerCertificate: boolean
   filePath: string
+  sqliteSelectionKind: 'file' | 'directory' | null
+  sqliteDirectory: string
+  sqliteDatabaseName: string
   ssh: SshFormValues
 }
 
@@ -52,10 +55,20 @@ const saving = reactive({ value: false })
 function createBlankSsh(): SshFormValues {
   return { enabled: false, host: '', port: 22, user: '', authType: 'password', password: '', privateKeyPath: '', passphrase: '' }
 }
+function splitFilePath(filePath: string): { directory: string; databaseName: string } {
+  const normalized = filePath.replace(/\\/g, '/')
+  const separator = normalized.lastIndexOf('/')
+  if (separator < 0) return { directory: '', databaseName: normalized }
+  const directory = separator === 0 ? '/' : normalized.slice(0, separator)
+  return { directory, databaseName: normalized.slice(separator + 1) }
+}
 function createBlankForm(): FormValues {
-  return { name: '', type: 'mysql', permissionMode: 'readonly', permissionModeLocked: false, host: '127.0.0.1', port: 3306, user: 'root', password: '', database: '', authDatabase: '', tls: false, encrypt: false, trustServerCertificate: true, filePath: '', ssh: createBlankSsh() }
+  return { name: '', type: 'mysql', permissionMode: 'readonly', permissionModeLocked: false, host: '127.0.0.1', port: 3306, user: 'root', password: '', database: '', authDatabase: '', tls: false, encrypt: false, trustServerCertificate: true, filePath: '', sqliteSelectionKind: null, sqliteDirectory: '', sqliteDatabaseName: '', ssh: createBlankSsh() }
 }
 function resetForm(): void {
+  const sqliteFile = props.initial?.type === 'sqlite' && props.initial.filePath
+    ? splitFilePath(props.initial.filePath)
+    : null
   const next = props.initial
     ? {
         ...createBlankForm(),
@@ -63,7 +76,10 @@ function resetForm(): void {
         permissionModeLocked: props.initial.permissionModeLocked === true,
         port: props.initial.port ?? defaultPorts[props.initial.type],
         password: '',
-        ssh: { ...createBlankSsh(), ...props.initial.ssh, password: '', passphrase: '' }
+        ssh: { ...createBlankSsh(), ...props.initial.ssh, password: '', passphrase: '' },
+        sqliteSelectionKind: sqliteFile ? 'file' as const : null,
+        sqliteDirectory: sqliteFile?.directory ?? '',
+        sqliteDatabaseName: sqliteFile?.databaseName ?? ''
       }
     : createBlankForm()
   Object.assign(form, next)
@@ -86,8 +102,19 @@ function onTypeChange(type: DbType): void {
   if (type === 'mongodb' || type === 'redis') form.user = ''
 }
 async function pickDatabaseFile(): Promise<void> {
-  const path = await window.api.pickSqliteFile()
-  if (path) form.filePath = path
+  const selection = await window.api.pickSqlitePath()
+  if (!selection) return
+  form.sqliteSelectionKind = selection.kind
+  if (selection.kind === 'file') {
+    const { directory, databaseName } = splitFilePath(selection.path)
+    form.filePath = selection.path
+    form.sqliteDirectory = directory
+    form.sqliteDatabaseName = databaseName
+  } else {
+    form.filePath = ''
+    form.sqliteDirectory = selection.path
+    form.sqliteDatabaseName = ''
+  }
 }
 async function pickSshKey(): Promise<void> {
   const path = await window.api.pickFile({ title: t('connection.selectSshKey') })
@@ -95,7 +122,11 @@ async function pickSshKey(): Promise<void> {
 }
 function validate(): { message: string; section: 'general' | 'ssh' } | null {
   if (!form.name.trim()) return { message: t('connection.validationName'), section: 'general' }
-  if (form.type === 'sqlite') return form.filePath ? null : { message: t('connection.validationFile'), section: 'general' }
+  if (form.type === 'sqlite') {
+    if (!form.sqliteSelectionKind || !form.sqliteDirectory.trim()) return { message: t('connection.validationPath'), section: 'general' }
+    if (!form.sqliteDatabaseName.trim()) return { message: t('connection.validationDatabaseName'), section: 'general' }
+    return null
+  }
   if (!form.host.trim()) return { message: t('connection.validationHost'), section: 'general' }
   if (!form.port || form.port < 1 || form.port > 65535) return { message: t('connection.validationPort'), section: 'general' }
   if (form.type !== 'mongodb' && form.type !== 'redis' && !form.user.trim()) return { message: t('connection.validationUser'), section: 'general' }
@@ -121,7 +152,11 @@ function buildPayload(): ConnectionConfig {
     tls: form.type === 'mongodb' || form.type === 'redis' ? form.tls : undefined,
     encrypt: form.type === 'sqlserver' ? form.encrypt : undefined,
     trustServerCertificate: form.type === 'sqlserver' ? form.trustServerCertificate : undefined,
-    filePath: form.type === 'sqlite' ? form.filePath : undefined, ssh
+    filePath: form.type === 'sqlite' && form.sqliteSelectionKind === 'file' ? form.filePath : undefined,
+    sqliteCreate: form.type === 'sqlite' && form.sqliteSelectionKind === 'directory'
+      ? { directory: form.sqliteDirectory, databaseName: form.sqliteDatabaseName }
+      : undefined,
+    ssh
   }
 }
 async function testConnection(): Promise<void> {
@@ -137,6 +172,7 @@ async function testConnection(): Promise<void> {
 }
 async function saveConnection(): Promise<void> {
   const error = validate()
+  if (error) { activeSection.value = error.section; message.warning(error.message); return }
   saving.value = true
   try {
     await store.saveConnection(buildPayload())
@@ -150,7 +186,7 @@ async function saveConnection(): Promise<void> {
 
 <template>
   <NModal :show="show" preset="card" :title="initial ? t('connection.editTitle') : t('connection.newTitle')" class="connection-modal" @close="emit('close')">
-    <NForm label-placement="left" label-align="left" :label-width="88" :show-feedback="false" class="connection-form">
+    <NForm label-placement="left" label-align="right" :label-width="148" :show-feedback="false" class="connection-form">
       <NTabs v-model:value="activeSection" type="line" animated class="connection-tabs">
         <NTabPane name="general" :tab="t('connection.generalTab')" class="connection-tab-pane">
           <NFormItem :label="t('connection.databaseType')" required><NSelect :value="form.type" :options="databaseTypeOptions" :render-label="renderDatabaseTypeLabel" @update:value="(value) => onTypeChange(value as DbType)" /></NFormItem>
@@ -178,9 +214,17 @@ async function saveConnection(): Promise<void> {
               <NFormItem :label="t('connection.trustCertificate')"><NSwitch v-model:value="form.trustServerCertificate" /></NFormItem>
             </template>
           </template>
-          <NFormItem v-else :label="t('connection.databaseFile')" required>
-            <NInputGroup><NInput v-model:value="form.filePath" placeholder="/path/to/data.db" /><NButton @click="pickDatabaseFile"><template #icon><NIcon><FolderOpenOutlined /></NIcon></template>{{ t('connection.choose') }}</NButton></NInputGroup>
-          </NFormItem>
+          <template v-else>
+            <NFormItem :label="t('connection.databaseLocation')" required>
+              <NInputGroup><NInput :value="form.sqliteDirectory" readonly :placeholder="t('connection.databaseLocationPlaceholder')" /><NButton @click="pickDatabaseFile"><template #icon><NIcon><FolderOpenOutlined /></NIcon></template>{{ t('connection.choose') }}</NButton></NInputGroup>
+            </NFormItem>
+            <NFormItem :label="t('connection.databaseName')" required>
+              <NInput v-model:value="form.sqliteDatabaseName" :disabled="form.sqliteSelectionKind === 'file'" :placeholder="t('connection.databaseNamePlaceholder')" />
+            </NFormItem>
+            <div v-if="form.sqliteSelectionKind" class="sqlite-path-help">
+              {{ form.sqliteSelectionKind === 'file' ? t('connection.sqliteExistingHelp') : t('connection.sqliteCreateHelp') }}
+            </div>
+          </template>
           <NFormItem :label="t('connection.markerColor')"><NColorPicker v-model:value="form.color" class="marker-color-picker" clearable :swatches="['#f5222d', '#fa8c16', '#fadb14', '#52c41a', '#1677ff', '#722ed1']" /></NFormItem>
         </NTabPane>
         <NTabPane v-if="form.type !== 'sqlite'" name="ssh" :tab="t('connection.sshTab')" class="connection-tab-pane">

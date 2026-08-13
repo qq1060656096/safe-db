@@ -455,16 +455,18 @@ const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
       title: '#',
       key: '__rowNumber',
       width: 64,
+      fixed: 'left' as const,
       align: 'right',
       render: (row: Record<string, unknown>) => h('span', { class: 'table-row-number' }, row.__tempId ? '*' : (page.value - 1) * pageSize.value + Number(row.__rowIndex) + 1)
     },
-    { type: 'selection', disabled: (row) => Boolean(row.__tempId) },
+    { type: 'selection', fixed: 'left' as const, disabled: (row) => Boolean(row.__tempId) },
     ...data.value.columns.map((column) => ({
       title: () => h('span', {
         class: 'result-column-header',
         title: `${column.name}\n${t('query.columnSelectionHelp')}`
       }, [column.isPrimaryKey ? h('span', { class: 'primary-key', title: t('grid.primaryKey') }, '🔑') : null, column.name, h('small', { class: 'column-type' }, column.dataType)]),
       key: column.name,
+      fixed: column.isPrimaryKey ? 'left' as const : undefined,
       className: 'copyable-data-column',
       cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
       ellipsis: { tooltip: true }, sorter: 'default' as const,

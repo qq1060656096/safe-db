@@ -6,7 +6,17 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sqlCompletionExtension, type SqlCompletionCatalog } from '../sqlCompletion'
 
 const props = defineProps<{ modelValue: string; placeholder: string; completion: SqlCompletionCatalog }>()
-const emit = defineEmits<{ 'update:modelValue': [value: string]; run: [selectedSql: string] }>()
+interface SqlEditorStatus {
+  line: number
+  column: number
+  selectionLength: number
+}
+
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  run: [selectedSql: string]
+  status: [status: SqlEditorStatus]
+}>()
 const host = ref<HTMLDivElement | null>(null)
 const sqlLanguage = new Compartment()
 let view: EditorView | null = null
@@ -18,7 +28,26 @@ function getSelectedText(): string {
   return from === to ? '' : view.state.sliceDoc(from, to)
 }
 
-defineExpose({ getSelectedText })
+function emitStatus(): void {
+  if (!view) return
+  const selection = view.state.selection.main
+  const line = view.state.doc.lineAt(selection.head)
+  emit('status', {
+    line: line.number,
+    column: selection.head - line.from + 1,
+    selectionLength: Math.abs(selection.to - selection.from)
+  })
+}
+
+function focusLine(lineNumber: number): void {
+  if (!view) return
+  const safeLine = Math.max(1, Math.min(lineNumber, view.state.doc.lines))
+  const line = view.state.doc.line(safeLine)
+  view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true })
+  view.focus()
+}
+
+defineExpose({ getSelectedText, focusLine })
 
 onMounted(() => {
   if (!host.value) return
@@ -33,10 +62,12 @@ onMounted(() => {
         Prec.high(keymap.of([{ key: 'Mod-Enter', run: () => { emit('run', getSelectedText()); return true } }])),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !applyingExternalValue) emit('update:modelValue', update.state.doc.toString())
+          if (update.docChanged || update.selectionSet) emitStatus()
         })
       ]
     })
   })
+  emitStatus()
 })
 
 watch(

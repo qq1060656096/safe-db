@@ -42,10 +42,11 @@ const columns = computed<DataTableColumns<Record<string, unknown>>>(() =>
       title: '#',
       key: '__rowNumber',
       width: 64,
+      fixed: 'left' as const,
       align: 'right',
       render: (row: Record<string, unknown>) => h('span', { class: 'table-row-number' }, Number(row.__resultKey) + 1)
     },
-    { type: 'selection' },
+    { type: 'selection', fixed: 'left' as const },
     ...(props.result.columns ?? []).map((column) => ({
       title: () => h('span', {
         class: 'result-column-header',

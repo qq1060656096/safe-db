@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from 'vue'
-import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnlockOutlined } from '@vicons/antd'
+import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
+import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnlockOutlined } from '@vicons/antd'
 import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NModal, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
@@ -58,7 +58,6 @@ function renderConnectionTypeIcon(connection: ConnectionMeta): ReturnType<typeof
   })
 }
 const languageOptions = localeOptions.map<DropdownOption>(({ value, label }) => ({ key: value, label }))
-const currentLocaleLabel = computed(() => localeOptions.find(({ value }) => value === settings.locale)?.shortLabel ?? '中')
 function selectLocale(value: string | number): void {
   if (isAppLocale(value)) settings.setLocale(value)
 }
@@ -71,6 +70,8 @@ const queryConnectionOptions = computed<DropdownOption[]>(() => store.connection
   : [{ key: 'empty', label: t('sidebar.noConnections'), disabled: true }]
 )
 const connectionTransferOptions = computed<DropdownOption[]>(() => [
+  { key: 'language', label: t('common.language'), children: languageOptions },
+  { type: 'divider', key: 'language-divider' },
   { key: 'import', label: t('sidebar.importConnections'), icon: () => h(NIcon, null, { default: () => h(ImportOutlined) }) },
   { key: 'export', label: t('sidebar.exportConnections'), disabled: store.connections.length === 0, icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }) }
 ])
@@ -873,6 +874,26 @@ const displayData = computed(() => {
   expandedKeys.value = [...new Set([...expandedKeys.value, ...forced])]
   return result
 })
+let searchMetadataTimer: ReturnType<typeof setTimeout> | null = null
+let searchMetadataRequest = 0
+watch(search, (keyword) => {
+  if (searchMetadataTimer) clearTimeout(searchMetadataTimer)
+  const request = ++searchMetadataRequest
+  if (!keyword.trim()) return
+  searchMetadataTimer = setTimeout(() => {
+    const loads = store.connections
+      .filter((connection) => store.connectedIds[connection.id])
+      .map(async (connection) => {
+        const root = treeData.value.find((node) => node.key === connectionKey(connection.id))
+        if (root?.children?.some((node) => node.data.kind === 'database')) return
+        const children = await loadConnectionChildren(connection.id)
+        if (request === searchMetadataRequest) setNodeChildren(connectionKey(connection.id), children)
+      })
+    void Promise.all(loads).catch(() => undefined)
+  }, 250)
+})
+onBeforeUnmount(() => { if (searchMetadataTimer) clearTimeout(searchMetadataTimer) })
+function collapseAll(): void { expandedKeys.value = [] }
 function openNewConnection(): void { editing.value = null; dialogOpen.value = true }
 function closeDialog(): void { dialogOpen.value = false; editing.value = null }
 function openNewQuery(connectionId: string | number): void {
@@ -880,6 +901,7 @@ function openNewQuery(connectionId: string | number): void {
   if (connection) store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: connection.name }), connectionId: connection.id })
 }
 async function transferConnections(action: string | number): Promise<void> {
+  if (isAppLocale(action)) { selectLocale(action); return }
   try {
     if (action === 'export') {
       const path = await window.api.exportConnections()
@@ -913,15 +935,17 @@ function selectContextMenu(key: string | number): void {
   <aside class="app-sidebar">
     <header class="sidebar-header">
       <span class="sidebar-actions">
-        <NDropdown trigger="click" :options="languageOptions" @select="selectLocale"><NButton quaternary size="tiny" :title="t('common.language')">{{ currentLocaleLabel }}</NButton></NDropdown>
         <NButton quaternary size="small" :title="t('sidebar.auditLog')" @click="store.openTab({ type: 'audit', title: t('sidebar.auditLog') })"><template #icon><NIcon><HistoryOutlined /></NIcon></template></NButton>
         <NDropdown trigger="click" :options="queryConnectionOptions" @select="openNewQuery"><NButton quaternary size="small" :title="t('sidebar.newQuery')"><template #icon><NIcon><CodeOutlined /></NIcon></template></NButton></NDropdown>
         <NDropdown trigger="click" :options="connectionTransferOptions" @select="transferConnections"><NButton quaternary size="small" :title="t('sidebar.connectionManagement')"><template #icon><NIcon><MoreOutlined /></NIcon></template></NButton></NDropdown>
         <NButton type="primary" secondary size="small" @click="openNewConnection"><template #icon><NIcon><PlusOutlined /></NIcon></template>{{ t('sidebar.newConnection') }}</NButton>
       </span>
     </header>
-    <div class="sidebar-search"><NInput v-model:value="search" clearable size="small" :placeholder="t('sidebar.searchPlaceholder')"><template #prefix><NIcon color="#aaa"><SearchOutlined /></NIcon></template></NInput></div>
-    <div class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
+    <div class="sidebar-search">
+      <NInput v-model:value="search" clearable size="small" :placeholder="t('sidebar.searchPlaceholder')"><template #prefix><NIcon color="#aaa"><SearchOutlined /></NIcon></template></NInput>
+      <NButton quaternary size="small" :title="t('sidebar.collapseAll')" :aria-label="t('sidebar.collapseAll')" @click="collapseAll"><template #icon><NIcon><MenuFoldOutlined /></NIcon></template></NButton>
+    </div>
+    <div class="sidebar-tree"><NTree remote virtual-scroll block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
     <NDropdown trigger="manual" placement="bottom-start" :show="contextMenuShow" :x="contextMenuX" :y="contextMenuY" :options="contextMenuOptions" @select="selectContextMenu" @clickoutside="contextMenuShow = false" />
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
     <NModal :show="copyModalOpen" :mask-closable="!copyingTable" @update:show="(show) => { if (!show) closeCopyTable() }">

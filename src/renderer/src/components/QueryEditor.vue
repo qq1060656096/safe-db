@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
+import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, CopyOutlined, DatabaseOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
 import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useMessage, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
@@ -16,14 +16,23 @@ import { useAppStore } from '../stores/app'
 import QueryResultView from './QueryResultView.vue'
 import SqlEditor from './SqlEditor.vue'
 
+interface SqlEditorHandle {
+  getSelectedText(): string
+  focusLine(line: number): void
+}
+interface EditorStatus { line: number; column: number; selectionLength: number }
+
 const props = defineProps<{ tab: AppTab }>()
 const store = useAppStore()
 const { t } = useI18n()
 const message = useMessage()
 const value = ref(props.tab.sql ?? '')
-const sqlEditor = ref<{ getSelectedText: () => string } | null>(null)
+const sqlEditor = ref<SqlEditorHandle | null>(null)
 const executedSql = ref('')
 const response = ref<ExecuteResponse | null>(null)
+const lastSuccessfulResponse = ref<ExecuteResponse | null>(null)
+const lastSuccessfulSql = ref('')
+const editorStatus = ref<EditorStatus>({ line: 1, column: 1, selectionLength: 0 })
 const activeResultIndex = ref(0)
 const running = ref(false)
 const stopping = ref(false)
@@ -40,10 +49,25 @@ const savedDatabase = ref<string | null>(null)
 const saveDatabaseOptions = ref<SelectOption[]>([])
 const saveDatabasesLoading = ref(false)
 const saving = ref(false)
+let closeSaveResolver: ((saved: boolean) => void) | null = null
 const savedQuery = computed(() => store.savedQueries.find((query) => query.id === props.tab.savedQueryId))
 const savedSqlBaseline = ref(props.tab.savedQueryId ? props.tab.sql ?? '' : '')
 const isDirty = computed(() => value.value !== (props.tab.savedQueryId ? savedSqlBaseline.value : ''))
 const canSave = computed(() => isDirty.value && Boolean(value.value.trim()) && !saving.value)
+const displayedResponse = computed(() => response.value?.status === 'ok' ? response.value : lastSuccessfulResponse.value)
+const displayedSql = computed(() => response.value?.status === 'ok' ? executedSql.value : lastSuccessfulSql.value)
+const resultRowCount = computed(() => displayedResponse.value?.results?.reduce((count, result) => count + (result.rows?.length ?? 0), 0) ?? 0)
+const hasRowResult = computed(() => displayedResponse.value?.results?.some((result) => result.kind === 'rows') ?? false)
+const errorLine = computed(() => {
+  const error = response.value?.status === 'error' ? response.value.error ?? '' : ''
+  const match = /(?:at|on)\s+line\s+(\d+)/i.exec(error) ?? /第\s*(\d+)\s*行/.exec(error)
+  return match ? Number(match[1]) : null
+})
+const errorSuggestion = computed(() => {
+  const error = response.value?.status === 'error' ? response.value.error ?? '' : ''
+  const variable = /Unknown system variable ['"]?([A-Za-z_][\w$]*)/i.exec(error)?.[1]
+  return variable ? t('query.mysqlVariableSuggestion', { name: variable }) : ''
+})
 const saveConnectionOptions = computed<SelectOption[]>(() => store.connections.map((item) => ({ label: item.name, value: item.id })))
 const saveConnection = computed(() => store.connections.find((item) => item.id === savedConnectionId.value))
 const editorPlaceholder = computed(() => connection.value?.type === 'mongodb'
@@ -127,6 +151,8 @@ onMounted(() => {
   requestAnimationFrame(normalizeEditorHeight)
 })
 onBeforeUnmount(() => {
+  closeSaveResolver?.(false)
+  closeSaveResolver = null
   stopEditorResize()
   window.removeEventListener('resize', normalizeEditorHeight)
   window.removeEventListener('keydown', handleSaveShortcut)
@@ -231,7 +257,11 @@ async function run(selectedSql?: string): Promise<void> {
     const result = await store.executeWithApproval(props.tab.connectionId, sqlText, props.tab.database)
     if (generation !== runGeneration) return
     response.value = result
-    if (result.status === 'ok') activeResultIndex.value = 0
+    if (result.status === 'ok') {
+      activeResultIndex.value = 0
+      lastSuccessfulResponse.value = result
+      lastSuccessfulSql.value = sqlText
+    }
     if (result.status === 'denied') message.warning(result.error ?? '')
     else if (result.status === 'error') message.error(result.error ?? '')
   } finally {
@@ -264,6 +294,8 @@ function clear(): void {
   value.value = ''
   executedSql.value = ''
   response.value = null
+  lastSuccessfulResponse.value = null
+  lastSuccessfulSql.value = ''
   activeResultIndex.value = 0
   stopStatus.value = null
 }
@@ -314,8 +346,8 @@ function openSaveDialog(): void {
   void loadSaveDatabases(savedConnectionId.value, true)
 }
 
-async function persistCurrentQuery(input: SavedQueryInput): Promise<void> {
-  if (saving.value) return
+async function persistCurrentQuery(input: SavedQueryInput): Promise<boolean> {
+  if (saving.value) return false
   saving.value = true
   try {
     const saved = await store.saveQuery(input)
@@ -323,8 +355,12 @@ async function persistCurrentQuery(input: SavedQueryInput): Promise<void> {
     store.bindSavedQuery(props.tab.id, saved)
     saveDialogOpen.value = false
     message.success(t('query.querySaved', { name: saved.name }))
+    closeSaveResolver?.(true)
+    closeSaveResolver = null
+    return true
   } catch (error) {
     message.error(t('query.querySaveFailed', { error: error instanceof Error ? error.message : String(error) }))
+    return false
   } finally {
     saving.value = false
   }
@@ -359,11 +395,51 @@ async function requestSave(): Promise<void> {
     sql: value.value
   })
 }
+
+function closeSaveDialog(): void {
+  if (saving.value) return
+  saveDialogOpen.value = false
+  closeSaveResolver?.(false)
+  closeSaveResolver = null
+}
+
+async function saveForClose(): Promise<boolean> {
+  if (!isDirty.value) return true
+  if (!value.value.trim()) {
+    message.warning(t('query.queryContentRequired'))
+    return false
+  }
+  const existing = savedQuery.value
+  if (existing) {
+    return persistCurrentQuery({
+      id: existing.id,
+      name: existing.name,
+      connectionId: existing.connectionId,
+      database: existing.database,
+      sql: value.value
+    })
+  }
+  if (closeSaveResolver) return false
+  openSaveDialog()
+  return new Promise<boolean>((resolve) => { closeSaveResolver = resolve })
+}
+
+async function copyError(): Promise<void> {
+  if (response.value?.status !== 'error' || !response.value.error) return
+  await navigator.clipboard.writeText(response.value.error)
+  message.success(t('common.copied'))
+}
+
+function locateError(): void {
+  if (errorLine.value) sqlEditor.value?.focusLine(errorLine.value)
+}
+
+defineExpose({ saveForClose })
 </script>
 
 <template>
   <div ref="queryPage" class="module-page query-editor-page">
-    <div class="module-toolbar">
+    <div class="module-toolbar query-toolbar">
       <NButton type="primary" size="small" :loading="running" :disabled="stopping" :title="t('query.runSelectionHelp')" @click="run()">
         <template #icon><NIcon><CaretRightOutlined /></NIcon></template>
         {{ t('query.run') }}
@@ -376,6 +452,7 @@ async function requestSave(): Promise<void> {
         <template #icon><NIcon><SaveOutlined /></NIcon></template>
         {{ t('query.saveQuery') }}
       </NButton>
+      <span class="query-toolbar-divider" />
       <span class="query-database-label">{{ t('query.database') }}</span>
       <NSelect
         class="query-database-select"
@@ -394,16 +471,23 @@ async function requestSave(): Promise<void> {
       <NButton quaternary size="small" :aria-label="t('common.clear')" @click="clear">
         <template #icon><NIcon><ClearOutlined /></NIcon></template>
       </NButton>
+      <span class="query-toolbar-spacer" />
       <NButton size="small" :disabled="!tab.connectionId" @click="createQueryFromCurrent">
         <template #icon><NIcon><PlusOutlined /></NIcon></template>
         {{ t('sidebar.newQuery') }}
       </NButton>
-      <span class="toolbar-meta">
-        {{ connection?.name }}
-        <template v-if="response?.durationMs !== undefined"> · {{ t('common.duration', { value: response.durationMs }) }}</template>
-      </span>
     </div>
-    <div class="editor-wrap" :style="{ height: `${editorHeight}px` }"><SqlEditor ref="sqlEditor" v-model="value" :placeholder="editorPlaceholder" :completion="completion" @run="run" /></div>
+    <div class="editor-wrap" :style="{ height: `${editorHeight}px` }"><SqlEditor ref="sqlEditor" v-model="value" :placeholder="editorPlaceholder" :completion="completion" @run="run" @status="editorStatus = $event" /></div>
+    <div class="query-status-bar">
+      <span class="query-status-location"><i class="query-status-dot" :style="{ background: connection?.color || '#18a058' }" />{{ connection?.name ?? '-' }}<template v-if="tab.database"> / {{ tab.database }}</template></span>
+      <span>{{ t('query.cursorPosition', { line: editorStatus.line, column: editorStatus.column }) }}</span>
+      <span v-if="editorStatus.selectionLength">{{ t('query.selectedCharacters', { count: editorStatus.selectionLength }) }}</span>
+      <span v-if="connection">{{ t(`permission.${connection.permissionMode}`) }}</span>
+      <span v-if="displayedResponse?.durationMs !== undefined">{{ t('common.duration', { value: displayedResponse.durationMs }) }}</span>
+      <span v-if="hasRowResult">{{ t('query.rowsCount', { count: resultRowCount }) }}</span>
+      <span class="query-status-spacer" />
+      <span :class="isDirty ? 'query-state-dirty' : 'query-state-saved'">{{ t(isDirty ? 'query.modified' : 'query.unmodified') }}</span>
+    </div>
     <div
       class="query-editor-resizer"
       :class="{ active: editorResizing }"
@@ -420,11 +504,19 @@ async function requestSave(): Promise<void> {
     <div class="query-results">
       <NAlert v-if="stopStatus" type="info" class="response-alert">{{ t(stopStatus === 'stopping' ? 'query.stopping' : 'query.stopped') }}</NAlert>
       <NAlert v-else-if="response?.status === 'denied'" type="warning" class="response-alert">{{ response.error }}</NAlert>
-      <NAlert v-else-if="response?.status === 'error'" type="error" :title="t('query.failed')" class="response-alert">{{ response.error }}</NAlert>
-      <template v-else-if="response?.status === 'ok'">
-        <NTabs v-if="response.results?.length" v-model:value="activeResultIndex" type="line" size="small" class="query-result-tabs">
-          <NTabPane v-for="(result, index) in response.results" :key="index" :name="index" display-directive="show:lazy">
-            <template #tab>{{ t('query.resultTab', { index: index + 1 }) }}</template>
+      <NAlert v-else-if="response?.status === 'error'" type="error" :title="t('query.failed')" class="response-alert">
+        <div>{{ response.error }}</div>
+        <div v-if="errorSuggestion" class="query-error-suggestion">{{ errorSuggestion }}</div>
+        <NSpace class="query-error-actions" size="small">
+          <NButton v-if="errorLine" text size="tiny" @click="locateError">{{ t('query.locateError') }}</NButton>
+          <NButton text size="tiny" @click="copyError"><template #icon><NIcon><CopyOutlined /></NIcon></template>{{ t('query.copyError') }}</NButton>
+        </NSpace>
+      </NAlert>
+      <div v-if="response?.status === 'error' && displayedResponse" class="query-last-result-hint">{{ t('query.showingLastSuccessfulResult') }}</div>
+      <template v-if="displayedResponse?.status === 'ok'">
+        <NTabs v-if="displayedResponse.results?.length" v-model:value="activeResultIndex" type="line" size="small" class="query-result-tabs">
+          <NTabPane v-for="(result, index) in displayedResponse.results" :key="index" :name="index" display-directive="show:lazy">
+            <template #tab>{{ result.kind === 'rows' ? t('query.resultTabRows', { index: index + 1, count: result.rows?.length ?? 0 }) : t('query.resultTab', { index: index + 1 }) }}</template>
             <QueryResultView
               :result="result"
               :index="index"
@@ -432,7 +524,7 @@ async function requestSave(): Promise<void> {
               :db-type="connection?.type"
               :database="tab.database"
               :schema="tab.schema"
-              :sql="executedSql"
+              :sql="displayedSql"
             />
           </NTabPane>
         </NTabs>
@@ -440,8 +532,8 @@ async function requestSave(): Promise<void> {
       </template>
     </div>
   </div>
-  <NModal v-model:show="saveDialogOpen">
-    <NCard class="query-save-modal" :title="t('query.saveQueryTitle')" closable @close="saveDialogOpen = false">
+  <NModal :show="saveDialogOpen" @update:show="(show) => { if (!show) closeSaveDialog() }">
+    <NCard class="query-save-modal" :title="t('query.saveQueryTitle')" closable @close="closeSaveDialog">
       <NFormItem :label="t('query.queryName')" required>
         <NInput v-model:value="savedName" maxlength="120" :placeholder="t('query.queryNamePlaceholder')" @keyup.enter="saveCurrentQuery" />
       </NFormItem>
@@ -464,7 +556,7 @@ async function requestSave(): Promise<void> {
       </NFormItem>
       <template #footer>
         <NSpace justify="end">
-          <NButton @click="saveDialogOpen = false">{{ t('common.cancel') }}</NButton>
+          <NButton @click="closeSaveDialog">{{ t('common.cancel') }}</NButton>
           <NButton type="primary" :loading="saving" @click="saveCurrentQuery">{{ t('common.save') }}</NButton>
         </NSpace>
       </template>

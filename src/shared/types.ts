@@ -50,8 +50,21 @@ export interface ConnectionConfig {
   trustServerCertificate?: boolean
   // sqlite
   filePath?: string
+  /**
+   * 仅在保存“选择目录后新建 SQLite 数据库”的表单时使用，不持久化。
+   * 主进程会校验目录和文件名，并据此生成最终 filePath。
+   */
+  sqliteCreate?: {
+    directory: string
+    databaseName: string
+  }
   /** SSH 隧道(除 SQLite 外) */
   ssh?: SshConfig
+}
+
+export interface SqlitePathSelection {
+  path: string
+  kind: 'file' | 'directory'
 }
 
 /** 列表展示用的连接信息(不含密码;SSH 的密码/私钥口令同样脱敏) */
@@ -264,7 +277,8 @@ export interface Api {
   exportConnections(): Promise<string | null>
   /** 导入连接配置；仅恢复当前系统账户能够解密的 safeStorage 密码。 */
   importConnections(): Promise<ConnectionImportResult>
-  pickSqliteFile(): Promise<string | null>
+  /** 选择已有 SQLite 文件或用于新建数据库的目录。 */
+  pickSqlitePath(): Promise<SqlitePathSelection | null>
   /** 通用文件选择(如 SSH 私钥) */
   pickFile(opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null>
   /** 选择 CSV / JSON 数据文件并读取 UTF-8 文本；取消返回 null。 */

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { SwitcherOutlined } from '@vicons/antd'
-import { NButton, NDropdown, NEmpty, NIcon, NTabPane, NTabs, useMessage, type DropdownOption } from 'naive-ui'
+import { NButton, NCard, NDropdown, NEmpty, NIcon, NModal, NSpace, NTabPane, NTabs, NTooltip, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import ApprovalModal from '../components/ApprovalModal.vue'
@@ -29,14 +29,19 @@ const tabMenuShow = ref(false)
 const tabMenuX = ref(0)
 const tabMenuY = ref(0)
 const tabMenuId = ref<string | null>(null)
+interface QueryEditorHandle { saveForClose(): Promise<boolean> }
+const queryEditorRefs = new Map<string, QueryEditorHandle>()
+const pendingCloseIds = ref<string[]>([])
+const closePromptTab = ref<(typeof store.tabs)[number] | null>(null)
+const closeSaving = ref(false)
 const LEFT_WIDTH_KEY = 'safe-db.layout.left-width'
 const RIGHT_WIDTH_KEY = 'safe-db.layout.right-width'
 const MIN_LEFT_WIDTH = 220
-const MIN_RIGHT_WIDTH = 220
+const MIN_RIGHT_WIDTH = 200
 const MAX_LEFT_WIDTH = 640
 const MAX_RIGHT_WIDTH = 720
 const leftWidth = ref(readPanelWidth(LEFT_WIDTH_KEY, window.innerWidth <= 1000 ? 250 : 300, MIN_LEFT_WIDTH, MAX_LEFT_WIDTH))
-const rightWidth = ref(readPanelWidth(RIGHT_WIDTH_KEY, window.innerWidth <= 1000 ? 220 : 280, MIN_RIGHT_WIDTH, MAX_RIGHT_WIDTH))
+const rightWidth = ref(readPanelWidth(RIGHT_WIDTH_KEY, window.innerWidth <= 1000 ? 220 : 250, MIN_RIGHT_WIDTH, MAX_RIGHT_WIDTH))
 const resizingSide = ref<'left' | 'right' | null>(null)
 let stopDataChangedListener: (() => void) | null = null
 let stopMetadataChangedListener: (() => void) | null = null
@@ -48,14 +53,25 @@ const panelStyle = computed<Record<string, string>>(() => ({
 }))
 const tabMenuOptions = computed<DropdownOption[]>(() => {
   const index = store.tabs.findIndex((tab) => tab.id === tabMenuId.value)
-  return [
-    { key: 'close', label: t('tabs.close'), disabled: index < 0 },
-    { type: 'divider', key: 'divider' },
+  const current = index >= 0 ? store.tabs[index] : undefined
+  const options: DropdownOption[] = [{ key: 'close', label: t('tabs.close'), disabled: index < 0 }]
+  if (current?.type === 'query') {
+    const otherSavedCount = store.tabs.filter((tab) => tab.id !== current.id && tab.type === 'query' && Boolean(tab.savedQueryId) && !tab.dirty).length
+    const unmodifiedCount = store.tabs.filter((tab) => tab.type === 'query' && !tab.dirty).length
+    options.push(
+      { type: 'divider', key: 'query-divider' },
+      { key: 'other-saved-queries', label: t('tabs.closeOtherSavedQueries'), disabled: otherSavedCount === 0 },
+      { key: 'unmodified-queries', label: t('tabs.closeUnmodifiedQueries'), disabled: unmodifiedCount === 0 }
+    )
+  }
+  options.push(
+    { type: 'divider', key: 'position-divider' },
     { key: 'left', label: t('tabs.closeLeft'), disabled: index <= 0 },
     { key: 'right', label: t('tabs.closeRight'), disabled: index < 0 || index >= store.tabs.length - 1 },
     { key: 'others', label: t('tabs.closeOthers'), disabled: index < 0 || store.tabs.length <= 1 },
     { key: 'all', label: t('tabs.closeAll'), disabled: store.tabs.length === 0 }
-  ]
+  )
+  return options
 })
 
 function readPanelWidth(key: string, fallback: number, minimum: number, maximum: number): number {
@@ -132,6 +148,7 @@ function normalizePanelWidths(): void {
 }
 
 onMounted(async () => {
+  if (!store.activeTabId && !isCompactLayout()) rightCollapsed.value = true
   normalizePanelWidths()
   window.addEventListener('resize', normalizePanelWidths)
   if (!hasApi.value) return
@@ -162,8 +179,61 @@ watch(() => route.params.tabId, (tabId) => {
 watch(() => store.activeTabId, (tabId) => {
   const target = tabId ? `/workspace/${tabId}` : '/workspace'
   if (route.path !== target) void router.replace(target)
+  if (!tabId && !isCompactLayout()) {
+    rightCollapsed.value = true
+    localStorage.setItem('safe-db.layout.right-collapsed', 'true')
+  }
 })
-function closeTab(id: string): void { store.closeTab(id) }
+function setQueryEditorRef(tabId: string, instance: unknown): void {
+  if (instance) queryEditorRefs.set(tabId, instance as QueryEditorHandle)
+  else queryEditorRefs.delete(tabId)
+}
+function processCloseQueue(): void {
+  while (pendingCloseIds.value.length) {
+    const id = pendingCloseIds.value[0]
+    const tab = store.tabs.find((item) => item.id === id)
+    if (!tab) { pendingCloseIds.value.shift(); continue }
+    if (tab.type === 'query' && tab.dirty) {
+      store.setActiveTab(tab.id)
+      closePromptTab.value = tab
+      return
+    }
+    store.closeTab(id)
+    pendingCloseIds.value.shift()
+  }
+  closePromptTab.value = null
+}
+function requestCloseTabs(ids: string[]): void {
+  const available = new Set(store.tabs.map((tab) => tab.id))
+  pendingCloseIds.value = [...new Set(ids)].filter((id) => available.has(id))
+  closePromptTab.value = null
+  processCloseQueue()
+}
+function closeTab(id: string): void { requestCloseTabs([id]) }
+async function saveAndClosePromptedTab(): Promise<void> {
+  const tab = closePromptTab.value
+  if (!tab || closeSaving.value) return
+  closeSaving.value = true
+  closePromptTab.value = null
+  const saved = await queryEditorRefs.get(tab.id)?.saveForClose() ?? false
+  closeSaving.value = false
+  if (!saved) { pendingCloseIds.value = []; return }
+  store.closeTab(tab.id)
+  pendingCloseIds.value.shift()
+  processCloseQueue()
+}
+function discardAndClosePromptedTab(): void {
+  const tab = closePromptTab.value
+  if (!tab) return
+  store.closeTab(tab.id)
+  pendingCloseIds.value.shift()
+  closePromptTab.value = null
+  processCloseQueue()
+}
+function cancelPendingClose(): void {
+  closePromptTab.value = null
+  pendingCloseIds.value = []
+}
 function openTabMenu(event: MouseEvent, id: string): void {
   event.preventDefault()
   event.stopPropagation()
@@ -176,11 +246,14 @@ function selectTabMenu(action: string | number): void {
   const id = tabMenuId.value
   tabMenuShow.value = false
   if (!id) return
-  if (action === 'close') store.closeTab(id)
-  else if (action === 'left') store.closeTabsLeft(id)
-  else if (action === 'right') store.closeTabsRight(id)
-  else if (action === 'others') store.closeOtherTabs(id)
-  else if (action === 'all') store.closeAllTabs()
+  const index = store.tabs.findIndex((tab) => tab.id === id)
+  if (action === 'close') requestCloseTabs([id])
+  else if (action === 'other-saved-queries') store.closeOtherSavedQueryTabs(id)
+  else if (action === 'unmodified-queries') store.closeUnmodifiedQueryTabs()
+  else if (action === 'left') requestCloseTabs(store.tabs.slice(0, index).map((tab) => tab.id))
+  else if (action === 'right') requestCloseTabs(store.tabs.slice(index + 1).map((tab) => tab.id))
+  else if (action === 'others') requestCloseTabs(store.tabs.filter((tab) => tab.id !== id).map((tab) => tab.id))
+  else if (action === 'all') requestCloseTabs(store.tabs.map((tab) => tab.id))
 }
 function openAudit(): void { store.openTab({ type: 'audit', title: t('sidebar.auditLog') }) }
 function openNewWindow(): void { void window.api.openNewWindow() }
@@ -267,12 +340,18 @@ function closeOverlayPanels(): void {
       >
         <NTabPane v-for="tab in store.tabs" :key="tab.id" :name="tab.id" display-directive="show">
           <template #tab>
-            <span class="workspace-tab-label" @contextmenu="openTabMenu($event, tab.id)">
-              <span class="workspace-tab-title">{{ tab.title }}</span>
-              <span v-if="tab.dirty" class="workspace-tab-dirty" :aria-label="t('tabs.unsavedChanges')">●</span>
-            </span>
+            <NTooltip :delay="500">
+              <template #trigger>
+                <span class="workspace-tab-label" @contextmenu="openTabMenu($event, tab.id)">
+                  <span v-if="tab.type === 'query'" class="workspace-tab-kind" :class="tab.savedQueryId ? 'is-saved' : 'is-temporary'" />
+                  <span class="workspace-tab-title">{{ tab.title }}</span>
+                  <span v-if="tab.dirty" class="workspace-tab-dirty" :aria-label="t('tabs.unsavedChanges')">●</span>
+                </span>
+              </template>
+              <span>{{ tab.title }}<template v-if="tab.connectionId"> · {{ store.connections.find((item) => item.id === tab.connectionId)?.name ?? '-' }}</template><template v-if="tab.database"> / {{ tab.database }}</template> · {{ t(tab.savedQueryId ? 'tabs.savedQuery' : 'tabs.temporaryQuery') }}</span>
+            </NTooltip>
           </template>
-          <QueryEditor v-if="tab.type === 'query'" :tab="tab" />
+          <QueryEditor v-if="tab.type === 'query'" :ref="(instance) => setQueryEditorRef(tab.id, instance)" :tab="tab" />
           <DataGrid v-else-if="tab.type === 'table'" :tab="tab" />
           <StructureDesigner v-else-if="tab.type === 'structure'" :tab="tab" />
           <ObjectListView v-else-if="tab.type === 'objects'" :tab="tab" />
@@ -297,5 +376,17 @@ function closeOverlayPanels(): void {
     />
     <div class="workspace-right"><RightPanel /></div>
     <ApprovalModal />
+    <NModal :show="Boolean(closePromptTab)" :mask-closable="false">
+      <NCard class="close-query-modal" :title="t('tabs.unsavedCloseTitle')" :closable="!closeSaving" @close="cancelPendingClose">
+        <p>{{ t('tabs.unsavedCloseMessage', { name: closePromptTab?.title ?? '' }) }}</p>
+        <template #footer>
+          <NSpace justify="end">
+            <NButton :disabled="closeSaving" @click="cancelPendingClose">{{ t('common.cancel') }}</NButton>
+            <NButton :disabled="closeSaving" @click="discardAndClosePromptedTab">{{ t('tabs.dontSave') }}</NButton>
+            <NButton type="primary" :loading="closeSaving" @click="saveAndClosePromptedTab">{{ t('common.save') }}</NButton>
+          </NSpace>
+        </template>
+      </NCard>
+    </NModal>
   </div>
 </template>

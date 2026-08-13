@@ -36,7 +36,7 @@ const api: Api = {
   testConnection: (cfg: ConnectionConfig) => ipcRenderer.invoke('connections:test', cfg),
   exportConnections: () => ipcRenderer.invoke('connections:export'),
   importConnections: () => ipcRenderer.invoke('connections:import'),
-  pickSqliteFile: () => ipcRenderer.invoke('connections:pickSqliteFile'),
+  pickSqlitePath: () => ipcRenderer.invoke('connections:pickSqlitePath'),
   pickFile: (opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) =>
     ipcRenderer.invoke('connections:pickFile', opts),
   pickDataFile: () => ipcRenderer.invoke('data:pickImportFile'),

@@ -25,7 +25,9 @@ export class SqliteDriver implements DbDriver {
 
   async connect(): Promise<void> {
     if (this.db) return
-    this.db = new Database(this.filePath)
+    // 连接配置只能指向已存在的数据库。新建数据库由保存连接流程显式完成，
+    // 避免路径错误时 better-sqlite3 静默创建空文件。
+    this.db = new Database(this.filePath, { fileMustExist: true })
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
   }
@@ -36,8 +38,9 @@ export class SqliteDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const d = new Database(this.filePath, { readonly: true, fileMustExist: false })
-    d.prepare('SELECT 1').get()
+    const d = new Database(this.filePath, { readonly: true, fileMustExist: true })
+    // 读取 schema 才能识别“普通文件伪装成 SQLite”的情况；SELECT 1 不会访问数据库页。
+    d.pragma('schema_version', { simple: true })
     d.close()
   }
 
