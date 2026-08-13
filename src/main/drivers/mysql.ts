@@ -52,13 +52,24 @@ export class MysqlDriver implements DbDriver {
   }
 
   async connect(): Promise<void> {
-    if (this.conn) return
+    if (this.conn?.state === 'authenticated') return
+    // mysql2 在空闲超时/网络断开后会保留 PromiseConnection 对象，但其内部
+    // 已进入 closed state；先丢弃该对象，再建立新会话。
+    this.conn?.destroy()
+    this.conn = null
     this.conn = await mysql.createConnection(this.options())
   }
 
   async disconnect(): Promise<void> {
-    await this.conn?.end().catch(() => {})
+    const connection = this.conn
+    // 必须先置空；end() 将连接切换为 closing，期间若有并发请求不能再拿到它。
     this.conn = null
+    if (!connection) return
+    if (connection.state === 'authenticated' || connection.state === 'connected') {
+      await connection.end().catch(() => {})
+    } else {
+      connection.destroy()
+    }
   }
 
   async cancel(): Promise<void> {

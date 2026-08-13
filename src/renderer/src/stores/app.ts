@@ -20,6 +20,8 @@ export interface AppTab {
   objectGroup?: ObjectGroup
   sql?: string
   savedQueryId?: string
+  /** 查询内容与最近一次保存的版本不一致。 */
+  dirty?: boolean
 }
 
 export interface PendingApproval {
@@ -187,6 +189,11 @@ export const useAppStore = defineStore('app', {
       tab.routineType = undefined
       tab.routineArguments = undefined
     },
+    setTabDirty(id: string, dirty: boolean): void {
+      const tab = this.tabs.find((item) => item.id === id)
+      if (!tab || tab.type !== 'query' || Boolean(tab.dirty) === dirty) return
+      tab.dirty = dirty || undefined
+    },
     bindSavedQuery(id: string, query: SavedQuery): void {
       const tab = this.tabs.find((item) => item.id === id)
       if (!tab || tab.type !== 'query') return
@@ -195,6 +202,7 @@ export const useAppStore = defineStore('app', {
       tab.connectionId = query.connectionId
       tab.database = query.database
       tab.sql = query.sql
+      tab.dirty = undefined
       tab.schema = undefined
       tab.routine = undefined
       tab.routineType = undefined

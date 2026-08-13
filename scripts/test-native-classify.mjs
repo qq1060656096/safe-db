@@ -54,4 +54,18 @@ assert.equal(
 )
 assert.equal(classifyDatabaseInput('mysql', '@value = 1; DELETE FROM users WHERE id = 1').kind, 'WRITE')
 
+const mysqlSetVariableQuery = `set companyId = 195878;
+set ordersNum = 'DH.20260807.0031';
+set ordersId = 340186;
+select * from import_orders where company_id = @companyId and orders_num = @ordersNum;
+select * from import_orders_list where company_id = @companyId and orders_id = @ordersId;`
+const normalizedMysqlSetVariables = normalizeMysqlSessionVariables(mysqlSetVariableQuery)
+assert.match(normalizedMysqlSetVariables, /set @companyId = 195878/)
+assert.match(normalizedMysqlSetVariables, /set @ordersNum = 'DH\.20260807\.0031'/)
+assert.match(normalizedMysqlSetVariables, /set @ordersId = 340186/)
+assert.equal(
+  normalizeMysqlSessionVariables("SET autocommit = 0; SELECT @@autocommit, '@autocommit'; -- @autocommit\n"),
+  "SET autocommit = 0; SELECT @@autocommit, '@autocommit'; -- @autocommit\n"
+)
+
 console.log('✔ MySQL / MongoDB / Redis 命令分类与解析测试通过')

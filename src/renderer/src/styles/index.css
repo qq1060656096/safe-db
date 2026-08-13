@@ -45,7 +45,9 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 .workspace-tabs > .n-tabs-nav { flex: 0 0 auto; margin-bottom: 0; }
 .workspace-tabs > .n-tab-pane, .workspace-tabs > .n-tabs-pane-wrapper { flex: 1; min-height: 0; }
 .workspace-tabs .n-tabs-pane-wrapper, .workspace-tabs .n-tab-pane { height: 100%; overflow: hidden; }
-.workspace-tab-label { display: inline-flex; align-items: center; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; white-space: nowrap; }
+.workspace-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.workspace-tab-dirty { flex: 0 0 auto; color: #18a058; font-size: 9px; line-height: 1; }
 .empty-workspace { flex: 1; min-height: 0; display: grid; place-items: center; padding: 32px; color: #777; text-align: center; }
 .missing-api { height: 100%; display: grid; place-items: center; padding: 32px; color: #777; text-align: center; }
 .right-panel { height: 100%; display: flex; flex-direction: column; border-left: 1px solid #e8e8e8; background: #fafafa; }

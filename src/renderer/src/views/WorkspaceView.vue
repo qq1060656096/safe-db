@@ -266,7 +266,12 @@ function closeOverlayPanels(): void {
         @close="(id) => closeTab(String(id))"
       >
         <NTabPane v-for="tab in store.tabs" :key="tab.id" :name="tab.id" display-directive="show">
-          <template #tab><span class="workspace-tab-label" @contextmenu="openTabMenu($event, tab.id)">{{ tab.title }}</span></template>
+          <template #tab>
+            <span class="workspace-tab-label" @contextmenu="openTabMenu($event, tab.id)">
+              <span class="workspace-tab-title">{{ tab.title }}</span>
+              <span v-if="tab.dirty" class="workspace-tab-dirty" :aria-label="t('tabs.unsavedChanges')">●</span>
+            </span>
+          </template>
           <QueryEditor v-if="tab.type === 'query'" :tab="tab" />
           <DataGrid v-else-if="tab.type === 'table'" :tab="tab" />
           <StructureDesigner v-else-if="tab.type === 'structure'" :tab="tab" />

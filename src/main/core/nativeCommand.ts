@@ -11,13 +11,57 @@ export interface RedisCommandInput {
   args: string[]
 }
 
+/** 收集 SQL 正文中的 @name 引用，忽略 @@系统变量、字符串、标识符和注释。 */
+function referencedMysqlUserVariables(input: string): Set<string> {
+  const names = new Set<string>()
+  let quote: "'" | '"' | '`' | null = null
+  let lineComment = false
+  let blockComment = false
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i]
+    const next = input[i + 1]
+    if (lineComment) {
+      if (char === '\n') lineComment = false
+      continue
+    }
+    if (blockComment) {
+      if (char === '*' && next === '/') { i++; blockComment = false }
+      continue
+    }
+    if (quote) {
+      if (char === '\\') i++
+      else if (char === quote) {
+        if (next === quote) i++
+        else quote = null
+      }
+      continue
+    }
+    if ((char === '-' && next === '-') || char === '#') {
+      if (char === '-') i++
+      lineComment = true
+      continue
+    }
+    if (char === '/' && next === '*') { i++; blockComment = true; continue }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue }
+    if (char !== '@' || next === '@' || input[i - 1] === '@') continue
+    const match = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(input.slice(i + 1))
+    if (!match) continue
+    names.add(match[0].toLowerCase())
+    i += match[0].length
+  }
+  return names
+}
+
 /**
- * 兼容查询编辑器中常见的 MySQL 会话变量简写：
- *   @name = 'value';
- * MySQL 原生要求写成 SET @name = 'value'。这里只在语句起始位置补 SET，
- * 并避开字符串、标识符和注释，避免改变普通查询内容。
+ * 兼容查询编辑器中常见的 MySQL 用户变量简写：
+ *   @name = 'value';              → SET @name = 'value';
+ *   SET name = 'value'; ... @name → SET @name = 'value'; ... @name
+ * 第二种仅在正文中确实存在同名 @name 引用时转换，避免改写 autocommit、sql_mode
+ * 等合法系统变量。扫描会避开字符串、标识符和注释。
  */
 export function normalizeMysqlSessionVariables(input: string): string {
+  const referencedVariables = referencedMysqlUserVariables(input)
   let output = ''
   let statementStart = true
   let quote: "'" | '"' | '`' | null = null
@@ -85,6 +129,13 @@ export function normalizeMysqlSessionVariables(input: string): string {
       continue
     }
     if (statementStart) {
+      const setAssignment = /^(SET)(\s+)([A-Za-z_][A-Za-z0-9_$]*)(?=\s*=)/i.exec(input.slice(i))
+      if (setAssignment && referencedVariables.has(setAssignment[3].toLowerCase())) {
+        output += `${setAssignment[1]}${setAssignment[2]}@${setAssignment[3]}`
+        i += setAssignment[0].length - 1
+        statementStart = false
+        continue
+      }
       if (/^@[A-Za-z_][A-Za-z0-9_$]*\s*=/.test(input.slice(i))) output += 'SET '
       statementStart = false
     }

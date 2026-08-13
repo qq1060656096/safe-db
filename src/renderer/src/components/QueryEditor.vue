@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, DatabaseOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
 import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useMessage, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { ConnectionMeta, ExecuteResponse } from '../../../shared/types'
+import type { ConnectionMeta, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
 import {
   connectionMetadataRevision,
   loadColumnMetadata,
@@ -41,6 +41,9 @@ const saveDatabaseOptions = ref<SelectOption[]>([])
 const saveDatabasesLoading = ref(false)
 const saving = ref(false)
 const savedQuery = computed(() => store.savedQueries.find((query) => query.id === props.tab.savedQueryId))
+const savedSqlBaseline = ref(props.tab.savedQueryId ? props.tab.sql ?? '' : '')
+const isDirty = computed(() => value.value !== (props.tab.savedQueryId ? savedSqlBaseline.value : ''))
+const canSave = computed(() => isDirty.value && Boolean(value.value.trim()) && !saving.value)
 const saveConnectionOptions = computed<SelectOption[]>(() => store.connections.map((item) => ({ label: item.name, value: item.id })))
 const saveConnection = computed(() => store.connections.find((item) => item.id === savedConnectionId.value))
 const editorPlaceholder = computed(() => connection.value?.type === 'mongodb'
@@ -111,14 +114,25 @@ function normalizeEditorHeight(): void {
   if (queryPage.value?.clientHeight) setEditorHeight(editorHeight.value)
 }
 
+function handleSaveShortcut(event: KeyboardEvent): void {
+  if (event.key.toLowerCase() !== 's' || (!event.metaKey && !event.ctrlKey) || event.altKey || store.activeTabId !== props.tab.id) return
+  event.preventDefault()
+  if (saveDialogOpen.value) void saveCurrentQuery()
+  else void requestSave()
+}
+
 onMounted(() => {
   window.addEventListener('resize', normalizeEditorHeight)
+  window.addEventListener('keydown', handleSaveShortcut)
   requestAnimationFrame(normalizeEditorHeight)
 })
 onBeforeUnmount(() => {
   stopEditorResize()
   window.removeEventListener('resize', normalizeEditorHeight)
+  window.removeEventListener('keydown', handleSaveShortcut)
 })
+
+watch(isDirty, (dirty) => store.setTabDirty(props.tab.id, dirty), { immediate: true, flush: 'sync' })
 
 async function refreshDatabaseOptions(clear = false): Promise<void> {
   const requestId = ++databaseOptionsRequestId
@@ -289,20 +303,12 @@ function openSaveDialog(): void {
   void loadSaveDatabases(savedConnectionId.value, true)
 }
 
-async function saveCurrentQuery(): Promise<void> {
-  const name = savedName.value.trim()
-  if (!name) { message.warning(t('query.queryNameRequired')); return }
-  if (!value.value.trim()) { message.warning(t('query.queryContentRequired')); return }
-  if (!savedConnectionId.value) { message.warning(t('query.connectionRequired')); return }
+async function persistCurrentQuery(input: SavedQueryInput): Promise<void> {
+  if (saving.value) return
   saving.value = true
   try {
-    const saved = await store.saveQuery({
-      id: props.tab.savedQueryId,
-      name,
-      connectionId: savedConnectionId.value,
-      database: savedDatabase.value ?? undefined,
-      sql: value.value
-    })
+    const saved = await store.saveQuery(input)
+    savedSqlBaseline.value = saved.sql
     store.bindSavedQuery(props.tab.id, saved)
     saveDialogOpen.value = false
     message.success(t('query.querySaved', { name: saved.name }))
@@ -311,6 +317,36 @@ async function saveCurrentQuery(): Promise<void> {
   } finally {
     saving.value = false
   }
+}
+
+async function saveCurrentQuery(): Promise<void> {
+  const name = savedName.value.trim()
+  if (!name) { message.warning(t('query.queryNameRequired')); return }
+  if (!value.value.trim()) { message.warning(t('query.queryContentRequired')); return }
+  if (!savedConnectionId.value) { message.warning(t('query.connectionRequired')); return }
+  await persistCurrentQuery({
+    id: props.tab.savedQueryId,
+    name,
+    connectionId: savedConnectionId.value,
+    database: savedDatabase.value ?? undefined,
+    sql: value.value
+  })
+}
+
+async function requestSave(): Promise<void> {
+  if (!canSave.value) return
+  const existing = savedQuery.value
+  if (!existing) {
+    openSaveDialog()
+    return
+  }
+  await persistCurrentQuery({
+    id: existing.id,
+    name: existing.name,
+    connectionId: existing.connectionId,
+    database: existing.database,
+    sql: value.value
+  })
 }
 </script>
 
@@ -325,7 +361,7 @@ async function saveCurrentQuery(): Promise<void> {
         <template #icon><NIcon><StopOutlined /></NIcon></template>
         {{ t('query.stop') }}
       </NButton>
-      <NButton size="small" :disabled="!value.trim()" @click="openSaveDialog">
+      <NButton size="small" :loading="saving" :disabled="!canSave" :title="`${t('query.saveQuery')} (Cmd/Ctrl+S)`" @click="requestSave">
         <template #icon><NIcon><SaveOutlined /></NIcon></template>
         {{ t('query.saveQuery') }}
       </NButton>

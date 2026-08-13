@@ -47,7 +47,8 @@ export default {
     closeLeft: '关闭左侧标签页',
     closeRight: '关闭右侧标签页',
     closeOthers: '关闭其他标签页',
-    closeAll: '关闭全部标签页'
+    closeAll: '关闭全部标签页',
+    unsavedChanges: '有未保存的修改'
   },
   panel: {
     details: '对象详情',
