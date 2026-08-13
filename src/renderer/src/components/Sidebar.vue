@@ -912,7 +912,6 @@ function selectContextMenu(key: string | number): void {
 <template>
   <aside class="app-sidebar">
     <header class="sidebar-header">
-      <span>{{ t('sidebar.connections') }}</span>
       <span class="sidebar-actions">
         <NDropdown trigger="click" :options="languageOptions" @select="selectLocale"><NButton quaternary size="tiny" :title="t('common.language')">{{ currentLocaleLabel }}</NButton></NDropdown>
         <NButton quaternary size="small" :title="t('sidebar.auditLog')" @click="store.openTab({ type: 'audit', title: t('sidebar.auditLog') })"><template #icon><NIcon><HistoryOutlined /></NIcon></template></NButton>

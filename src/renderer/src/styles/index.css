@@ -22,7 +22,7 @@ body.panel-resizing .workspace-shell { transition: none; }
 body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user-select: none !important; }
 .app-sidebar { height: 100%; display: flex; flex-direction: column; background: #fafafa; border-right: 1px solid #e8e8e8; }
 .sidebar-header { min-height: 46px; padding: 8px 10px 8px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #e8e8e8; font-weight: 600; }
-.sidebar-actions { display: flex; align-items: center; gap: 3px; }
+.sidebar-actions { margin-left: auto; display: flex; align-items: center; gap: 3px; }
 .sidebar-search { padding: 7px 8px; border-bottom: 1px solid #e8e8e8; }
 .sidebar-tree { flex: 1; min-height: 0; overflow: auto; padding: 4px; }
 .tree-node-title { min-width: 0; max-width: 220px; display: inline-flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

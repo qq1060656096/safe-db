@@ -364,10 +364,6 @@ async function requestSave(): Promise<void> {
 <template>
   <div ref="queryPage" class="module-page query-editor-page">
     <div class="module-toolbar">
-      <NButton size="small" :disabled="!tab.connectionId" @click="createQueryFromCurrent">
-        <template #icon><NIcon><PlusOutlined /></NIcon></template>
-        {{ t('sidebar.newQuery') }}
-      </NButton>
       <NButton type="primary" size="small" :loading="running" :disabled="stopping" :title="t('query.runSelectionHelp')" @click="run()">
         <template #icon><NIcon><CaretRightOutlined /></NIcon></template>
         {{ t('query.run') }}
@@ -397,6 +393,10 @@ async function requestSave(): Promise<void> {
       <NTooltip trigger="hover"><template #trigger><span class="keyboard-hint">⌃Space</span></template>{{ t('query.completionShortcut') }}</NTooltip>
       <NButton quaternary size="small" :aria-label="t('common.clear')" @click="clear">
         <template #icon><NIcon><ClearOutlined /></NIcon></template>
+      </NButton>
+      <NButton size="small" :disabled="!tab.connectionId" @click="createQueryFromCurrent">
+        <template #icon><NIcon><PlusOutlined /></NIcon></template>
+        {{ t('sidebar.newQuery') }}
       </NButton>
       <span class="toolbar-meta">
         {{ connection?.name }}
