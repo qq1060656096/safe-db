@@ -142,6 +142,12 @@ export function registerIpcHandlers(
   ipcMain.handle('window:new', (event) => {
     createWindow(senderWindow(event))
   })
+  ipcMain.handle('window:mode', (event) => {
+    const window = senderWindow(event)
+    if (!window) return 'normal'
+    if (window.isFullScreen()) return 'fullscreen'
+    return window.isMaximized() ? 'maximized' : 'normal'
+  })
 
   // ---- 连接管理 ----
   ipcMain.handle('connections:list', () => connections.list())

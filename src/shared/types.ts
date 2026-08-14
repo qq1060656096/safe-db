@@ -2,6 +2,9 @@
 
 export type DbType = 'mysql' | 'postgres' | 'sqlite' | 'sqlserver' | 'mongodb' | 'redis'
 
+/** Electron 窗口状态；最大化与系统全屏必须分别保存。 */
+export type WindowMode = 'normal' | 'maximized' | 'fullscreen'
+
 /** 权限模式:只读 / 审批(本地二次确认)/ 完全访问 */
 export type PermissionMode = 'readonly' | 'approval' | 'full'
 
@@ -259,6 +262,9 @@ export interface TableDataResult {
 export interface Api {
   // 窗口
   openNewWindow(): Promise<void>
+  getWindowMode(): Promise<WindowMode>
+  /** 窗口完成普通、最大化或全屏切换后通知渲染进程。 */
+  onWindowModeChanged(listener: (mode: WindowMode) => void): () => void
   /** 其他窗口修改共享数据时通知当前窗口刷新；返回取消监听函数。 */
   onDataChanged(listener: (resource: 'connections' | 'queries' | 'all') => void): () => void
   /** 任一窗口或 Agent 成功改变数据库元数据后，通知所有窗口失效对应连接的缓存。 */

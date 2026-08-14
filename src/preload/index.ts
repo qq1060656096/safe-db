@@ -12,6 +12,12 @@ import type {
 const api: Api = {
   // 窗口
   openNewWindow: () => ipcRenderer.invoke('window:new'),
+  getWindowMode: () => ipcRenderer.invoke('window:mode'),
+  onWindowModeChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, mode: import('../shared/types').WindowMode) => listener(mode)
+    ipcRenderer.on('window:modeChanged', handler)
+    return () => ipcRenderer.removeListener('window:modeChanged', handler)
+  },
   onDataChanged: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, resource: 'connections' | 'queries' | 'all') => listener(resource)
     ipcRenderer.on('data:changed', handler)

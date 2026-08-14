@@ -6,6 +6,14 @@ import { invalidateConnectionMetadata } from '../metadataCache'
 export type ObjectGroup = 'tables' | 'views' | 'routines' | 'queries'
 export type TabType = 'query' | 'table' | 'structure' | 'objects' | 'audit'
 
+export interface ObjectSelection {
+  kind: 'table' | 'routine'
+  name: string
+  schema?: string
+  routineType?: 'function' | 'procedure'
+  routineArguments?: string
+}
+
 export interface AppTab {
   id: string
   type: TabType
@@ -18,6 +26,7 @@ export interface AppTab {
   routineType?: 'function' | 'procedure'
   routineArguments?: string
   objectGroup?: ObjectGroup
+  objectSelection?: ObjectSelection
   sql?: string
   savedQueryId?: string
   /** 查询内容与最近一次保存的版本不一致。 */
@@ -204,6 +213,11 @@ export const useAppStore = defineStore('app', {
     },
     setActiveTab(id: string): void {
       if (this.tabs.some((tab) => tab.id === id)) this.activeTabId = id
+    },
+    setObjectSelection(id: string, selection?: ObjectSelection): void {
+      const tab = this.tabs.find((item) => item.id === id)
+      if (!tab || tab.type !== 'objects') return
+      tab.objectSelection = selection
     },
     setTabDatabase(id: string, database?: string): void {
       const tab = this.tabs.find((item) => item.id === id)

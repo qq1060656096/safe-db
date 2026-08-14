@@ -4,6 +4,7 @@ import App from './App.vue'
 import { i18n } from './i18n'
 import { router } from './router'
 import { useAppStore } from './stores/app'
+import { flushLayoutPreferences, useLayoutStore } from './stores/layout'
 import './styles/index.css'
 
 const app = createApp(App)
@@ -13,6 +14,8 @@ document.documentElement.lang = i18n.global.locale.value
 
 const appStore = useAppStore(pinia)
 appStore.listenForAgentApprovals()
+useLayoutStore(pinia)
+window.addEventListener('beforeunload', flushLayoutPreferences)
 
 if (import.meta.env.DEV) {
   window.__store = { getState: () => appStore }

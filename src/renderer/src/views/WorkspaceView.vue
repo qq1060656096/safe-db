@@ -4,6 +4,7 @@ import { SwitcherOutlined } from '@vicons/antd'
 import { NButton, NCard, NDropdown, NEmpty, NIcon, NModal, NSpace, NTabPane, NTabs, NTooltip, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
+import type { WindowMode } from '../../../shared/types'
 import ApprovalModal from '../components/ApprovalModal.vue'
 import AuditLog from '../components/AuditLog.vue'
 import DataGrid from '../components/DataGrid.vue'
@@ -14,17 +15,20 @@ import RightPanel from '../components/RightPanel.vue'
 import Sidebar from '../components/Sidebar.vue'
 import StructureDesigner from '../components/StructureDesigner.vue'
 import { useAppStore } from '../stores/app'
+import { defaultWorkspaceLayout, useLayoutStore } from '../stores/layout'
 import { invalidateConnectionMetadata } from '../metadataCache'
 
 const store = useAppStore()
+const layoutStore = useLayoutStore()
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
 const message = useMessage()
 const leftOpen = ref(false)
 const rightOpen = ref(false)
-const leftCollapsed = ref(localStorage.getItem('safe-db.layout.left-collapsed') === 'true')
-const rightCollapsed = ref(localStorage.getItem('safe-db.layout.right-collapsed') === 'true')
+const initialLayout = layoutStore.getWorkspaceLayout('normal') ?? defaultWorkspaceLayout()
+const leftCollapsed = ref(initialLayout.leftCollapsed)
+const rightCollapsed = ref(initialLayout.rightCollapsed)
 const tabMenuShow = ref(false)
 const tabMenuX = ref(0)
 const tabMenuY = ref(0)
@@ -34,22 +38,39 @@ const queryEditorRefs = new Map<string, QueryEditorHandle>()
 const pendingCloseIds = ref<string[]>([])
 const closePromptTab = ref<(typeof store.tabs)[number] | null>(null)
 const closeSaving = ref(false)
-const LEFT_WIDTH_KEY = 'safe-db.layout.left-width'
-const RIGHT_WIDTH_KEY = 'safe-db.layout.right-width'
 const MIN_LEFT_WIDTH = 220
 const MIN_RIGHT_WIDTH = 200
 const MAX_LEFT_WIDTH = 640
 const MAX_RIGHT_WIDTH = 720
-const leftWidth = ref(readPanelWidth(LEFT_WIDTH_KEY, window.innerWidth <= 1000 ? 250 : 300, MIN_LEFT_WIDTH, MAX_LEFT_WIDTH))
-const rightWidth = ref(readPanelWidth(RIGHT_WIDTH_KEY, window.innerWidth <= 1000 ? 220 : 250, MIN_RIGHT_WIDTH, MAX_RIGHT_WIDTH))
+const leftWidth = ref(initialLayout.leftWidth)
+const rightWidth = ref(initialLayout.rightWidth)
+const viewportWidth = ref(window.innerWidth)
+const currentWindowMode = ref<WindowMode>('normal')
 const resizingSide = ref<'left' | 'right' | null>(null)
 let stopDataChangedListener: (() => void) | null = null
 let stopMetadataChangedListener: (() => void) | null = null
+let stopWindowModeListener: (() => void) | null = null
+let windowModeInitialized = false
 const hasApi = computed(() => typeof window.api !== 'undefined')
 const activeTitle = computed(() => store.tabs.find((tab) => tab.id === store.activeTabId)?.title ?? t('app.name'))
+const displayedPanelWidths = computed(() => {
+  let left = leftCollapsed.value ? 0 : Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, leftWidth.value))
+  let right = rightCollapsed.value ? 0 : Math.min(MAX_RIGHT_WIDTH, Math.max(MIN_RIGHT_WIDTH, rightWidth.value))
+  let overflow = Math.max(0, left + right - Math.max(0, viewportWidth.value - minimumCenterWidth()))
+  if (overflow && right) {
+    const reduction = Math.min(overflow, Math.max(0, right - MIN_RIGHT_WIDTH))
+    right -= reduction
+    overflow -= reduction
+  }
+  if (overflow && left) {
+    const reduction = Math.min(overflow, Math.max(0, left - MIN_LEFT_WIDTH))
+    left -= reduction
+  }
+  return { left: Math.round(left), right: Math.round(right) }
+})
 const panelStyle = computed<Record<string, string>>(() => ({
-  '--left-panel-width': `${leftCollapsed.value ? 0 : leftWidth.value}px`,
-  '--right-panel-width': `${rightCollapsed.value ? 0 : rightWidth.value}px`
+  '--left-panel-width': `${displayedPanelWidths.value.left}px`,
+  '--right-panel-width': `${displayedPanelWidths.value.right}px`
 }))
 const tabMenuOptions = computed<DropdownOption[]>(() => {
   const index = store.tabs.findIndex((tab) => tab.id === tabMenuId.value)
@@ -74,38 +95,60 @@ const tabMenuOptions = computed<DropdownOption[]>(() => {
   return options
 })
 
-function readPanelWidth(key: string, fallback: number, minimum: number, maximum: number): number {
-  const raw = localStorage.getItem(key)
-  if (raw === null) return fallback
-  const stored = Number(raw)
-  return Number.isFinite(stored) ? Math.min(maximum, Math.max(minimum, stored)) : fallback
-}
-
 function minimumCenterWidth(): number {
-  return window.innerWidth <= 1000 ? 280 : 360
+  return viewportWidth.value <= 1000 ? 280 : 360
 }
 
-function visibleLeftWidth(): number { return leftCollapsed.value ? 0 : leftWidth.value }
-function visibleRightWidth(): number { return rightCollapsed.value ? 0 : rightWidth.value }
+function visibleLeftWidth(): number { return displayedPanelWidths.value.left }
+function visibleRightWidth(): number { return displayedPanelWidths.value.right }
 
 function setPanelWidth(side: 'left' | 'right', width: number): void {
   if (side === 'left') {
-    const available = window.innerWidth - visibleRightWidth() - minimumCenterWidth()
+    const available = viewportWidth.value - visibleRightWidth() - minimumCenterWidth()
     leftWidth.value = Math.round(Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, Math.min(width, available))))
   } else {
-    const available = window.innerWidth - visibleLeftWidth() - minimumCenterWidth()
+    const available = viewportWidth.value - visibleLeftWidth() - minimumCenterWidth()
     rightWidth.value = Math.round(Math.min(MAX_RIGHT_WIDTH, Math.max(MIN_RIGHT_WIDTH, Math.min(width, available))))
   }
 }
 
-function persistPanelWidth(side: 'left' | 'right'): void {
-  localStorage.setItem(side === 'left' ? LEFT_WIDTH_KEY : RIGHT_WIDTH_KEY, String(side === 'left' ? leftWidth.value : rightWidth.value))
+function persistWorkspaceLayout(): void {
+  if (!windowModeInitialized) return
+  layoutStore.setWorkspaceLayout(currentWindowMode.value, {
+    leftWidth: leftWidth.value,
+    rightWidth: rightWidth.value,
+    leftCollapsed: leftCollapsed.value,
+    rightCollapsed: rightCollapsed.value
+  })
+}
+
+function applyWorkspaceLayout(mode: WindowMode): void {
+  const profile = layoutStore.getWorkspaceLayout(mode)
+    ?? (mode === 'normal' ? undefined : layoutStore.getWorkspaceLayout('normal'))
+    ?? defaultWorkspaceLayout(viewportWidth.value)
+  leftWidth.value = profile.leftWidth
+  rightWidth.value = profile.rightWidth
+  leftCollapsed.value = profile.leftCollapsed
+  rightCollapsed.value = profile.rightCollapsed
+}
+
+function changeWindowMode(mode: WindowMode): void {
+  if (windowModeInitialized && mode === currentWindowMode.value) return
+  if (windowModeInitialized) persistWorkspaceLayout()
+  currentWindowMode.value = mode
+  layoutStore.setActiveWindowMode(mode)
+  applyWorkspaceLayout(mode)
+  windowModeInitialized = true
+}
+
+function handleWindowResize(): void {
+  viewportWidth.value = window.innerWidth
 }
 
 function stopResize(): void {
   const side = resizingSide.value
   if (!side) return
-  persistPanelWidth(side)
+  persistWorkspaceLayout()
   resizingSide.value = null
   document.body.classList.remove('panel-resizing')
   window.removeEventListener('pointermove', resizePanel)
@@ -138,20 +181,18 @@ function resizeWithKeyboard(side: 'left' | 'right', event: KeyboardEvent): void 
   const direction = event.key === 'ArrowRight' ? 1 : -1
   const delta = side === 'left' ? direction * 10 : direction * -10
   setPanelWidth(side, (side === 'left' ? leftWidth.value : rightWidth.value) + delta)
-  persistPanelWidth(side)
-}
-
-function normalizePanelWidths(): void {
-  if (isCompactLayout()) return
-  setPanelWidth('left', leftWidth.value)
-  setPanelWidth('right', rightWidth.value)
+  persistWorkspaceLayout()
 }
 
 onMounted(async () => {
-  if (!store.activeTabId && !isCompactLayout()) rightCollapsed.value = true
-  normalizePanelWidths()
-  window.addEventListener('resize', normalizePanelWidths)
+  viewportWidth.value = window.innerWidth
+  window.addEventListener('resize', handleWindowResize)
   if (!hasApi.value) return
+  if (typeof window.api.onWindowModeChanged === 'function') {
+    stopWindowModeListener = window.api.onWindowModeChanged(changeWindowMode)
+  }
+  if (typeof window.api.getWindowMode === 'function') changeWindowMode(await window.api.getWindowMode())
+  else changeWindowMode('normal')
   stopDataChangedListener = window.api.onDataChanged((resource) => {
     const loads: Promise<void>[] = []
     if (resource === 'connections' || resource === 'all') loads.push(store.loadConnections())
@@ -166,12 +207,15 @@ onMounted(async () => {
   catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
 })
 onBeforeUnmount(() => {
+  persistWorkspaceLayout()
+  stopWindowModeListener?.()
+  stopWindowModeListener = null
   stopDataChangedListener?.()
   stopDataChangedListener = null
   stopMetadataChangedListener?.()
   stopMetadataChangedListener = null
   stopResize()
-  window.removeEventListener('resize', normalizePanelWidths)
+  window.removeEventListener('resize', handleWindowResize)
 })
 watch(() => route.params.tabId, (tabId) => {
   if (typeof tabId === 'string' && store.tabs.some((tab) => tab.id === tabId)) store.setActiveTab(tabId)
@@ -179,11 +223,8 @@ watch(() => route.params.tabId, (tabId) => {
 watch(() => store.activeTabId, (tabId) => {
   const target = tabId ? `/workspace/${tabId}` : '/workspace'
   if (route.path !== target) void router.replace(target)
-  if (!tabId && !isCompactLayout()) {
-    rightCollapsed.value = true
-    localStorage.setItem('safe-db.layout.right-collapsed', 'true')
-  }
 })
+watch(() => layoutStore.revision, () => applyWorkspaceLayout(currentWindowMode.value))
 function setQueryEditorRef(tabId: string, instance: unknown): void {
   if (instance) queryEditorRefs.set(tabId, instance as QueryEditorHandle)
   else queryEditorRefs.delete(tabId)
@@ -265,8 +306,7 @@ function toggleLeft(): void {
     return
   }
   leftCollapsed.value = !leftCollapsed.value
-  if (!leftCollapsed.value) normalizePanelWidths()
-  localStorage.setItem('safe-db.layout.left-collapsed', String(leftCollapsed.value))
+  persistWorkspaceLayout()
 }
 function toggleRight(): void {
   if (isCompactLayout()) {
@@ -275,8 +315,7 @@ function toggleRight(): void {
     return
   }
   rightCollapsed.value = !rightCollapsed.value
-  if (!rightCollapsed.value) normalizePanelWidths()
-  localStorage.setItem('safe-db.layout.right-collapsed', String(rightCollapsed.value))
+  persistWorkspaceLayout()
 }
 function closeOverlayPanels(): void {
   leftOpen.value = false

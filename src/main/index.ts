@@ -6,9 +6,10 @@ import { registerIpcHandlers } from './ipc'
 import { AuditStore } from './store/audit'
 import { ConnectionStore } from './store/connections'
 import { QueryStore } from './store/queries'
+import { WindowStateStore, type WindowBounds } from './store/windowState'
 import { AgentServer } from './agent/server'
 import { AgentService } from './agent/service'
-import type { AgentApprovalRequest } from '../shared/types'
+import type { AgentApprovalRequest, WindowMode } from '../shared/types'
 
 const PRODUCT_NAME = 'safe db'
 
@@ -22,9 +23,64 @@ if (process.env.ELECTRON_RENDERER_URL) {
 }
 
 const windows = new Set<BrowserWindow>()
+const windowStateTimers = new Map<number, ReturnType<typeof setTimeout>>()
 let drivers: DriverManager | null = null
 let agentServer: AgentServer | null = null
 let agentService: AgentService | null = null
+let windowStateStore: WindowStateStore | null = null
+
+const MIN_WINDOW_WIDTH = 720
+const MIN_WINDOW_HEIGHT = 560
+
+function windowMode(window: BrowserWindow): WindowMode {
+  if (window.isFullScreen()) return 'fullscreen'
+  return window.isMaximized() ? 'maximized' : 'normal'
+}
+
+function restoredWindowBounds(): WindowBounds | undefined {
+  const saved = windowStateStore?.get()
+  const bounds = saved?.normalBounds
+  if (!bounds) return undefined
+  const displays = screen.getAllDisplays()
+  const display = displays.find((item) => item.id === saved.displayId)
+    ?? screen.getDisplayMatching(bounds)
+    ?? screen.getPrimaryDisplay()
+  const area = display.workArea
+  const width = Math.min(area.width, Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width)))
+  const height = Math.min(area.height, Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height)))
+  return {
+    width,
+    height,
+    x: Math.min(area.x + area.width - width, Math.max(area.x, Math.round(bounds.x))),
+    y: Math.min(area.y + area.height - height, Math.max(area.y, Math.round(bounds.y)))
+  }
+}
+
+function persistWindowState(window: BrowserWindow): void {
+  if (!windowStateStore || window.isDestroyed()) return
+  const mode = windowMode(window)
+  const display = screen.getDisplayMatching(window.getBounds())
+  windowStateStore.update({
+    lastMode: mode,
+    displayId: display.id,
+    ...(mode === 'normal' ? { normalBounds: window.getBounds() } : {})
+  })
+}
+
+function scheduleWindowStatePersist(window: BrowserWindow): void {
+  if (window.isDestroyed() || windowMode(window) !== 'normal') return
+  const id = window.id
+  const current = windowStateTimers.get(id)
+  if (current) clearTimeout(current)
+  windowStateTimers.set(id, setTimeout(() => {
+    windowStateTimers.delete(id)
+    persistWindowState(window)
+  }, 250))
+}
+
+function notifyWindowMode(window: BrowserWindow): void {
+  if (!window.webContents.isDestroyed()) window.webContents.send('window:modeChanged', windowMode(window))
+}
 
 function sendPendingAgentApprovals(window: BrowserWindow): void {
   if (!agentService || window.webContents.isDestroyed()) return
@@ -36,19 +92,22 @@ function sendPendingAgentApprovals(window: BrowserWindow): void {
 function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
   const sourceBounds = sourceWindow?.getNormalBounds()
   const displayBounds = sourceBounds ? screen.getDisplayMatching(sourceBounds).workArea : undefined
+  const restoredBounds = sourceWindow ? undefined : restoredWindowBounds()
   const x = sourceBounds && displayBounds
     ? Math.max(displayBounds.x, Math.min(sourceBounds.x + 28, displayBounds.x + displayBounds.width - sourceBounds.width))
-    : undefined
+    : restoredBounds?.x
   const y = sourceBounds && displayBounds
     ? Math.max(displayBounds.y, Math.min(sourceBounds.y + 28, displayBounds.y + displayBounds.height - sourceBounds.height))
-    : undefined
+    : restoredBounds?.y
+  const restoreMode = sourceWindow ? 'normal' : windowStateStore?.get().lastMode ?? 'normal'
   const window = new BrowserWindow({
-    width: sourceBounds?.width ?? 1440,
-    height: sourceBounds?.height ?? 900,
+    width: sourceBounds?.width ?? restoredBounds?.width ?? 1440,
+    height: sourceBounds?.height ?? restoredBounds?.height ?? 900,
     x,
     y,
-    minWidth: 720,
-    minHeight: 560,
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
+    show: false,
     title: PRODUCT_NAME,
     backgroundColor: '#1f1f1f',
     webPreferences: {
@@ -59,7 +118,26 @@ function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
     }
   })
   windows.add(window)
-  window.webContents.on('did-finish-load', () => sendPendingAgentApprovals(window))
+  window.webContents.on('did-finish-load', () => {
+    sendPendingAgentApprovals(window)
+    notifyWindowMode(window)
+  })
+  window.once('ready-to-show', () => {
+    if (restoreMode === 'maximized') window.maximize()
+    else if (restoreMode === 'fullscreen') window.setFullScreen(true)
+    window.show()
+  })
+
+  const handleWindowModeChange = (): void => {
+    persistWindowState(window)
+    notifyWindowMode(window)
+  }
+  window.on('move', () => scheduleWindowStatePersist(window))
+  window.on('resize', () => scheduleWindowStatePersist(window))
+  window.on('maximize', handleWindowModeChange)
+  window.on('unmaximize', handleWindowModeChange)
+  window.on('enter-full-screen', handleWindowModeChange)
+  window.on('leave-full-screen', handleWindowModeChange)
 
   // 外链交给系统浏览器
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -74,6 +152,12 @@ function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
     void window.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  window.on('close', () => {
+    const timer = windowStateTimers.get(window.id)
+    if (timer) clearTimeout(timer)
+    windowStateTimers.delete(window.id)
+    persistWindowState(window)
+  })
   window.on('closed', () => windows.delete(window))
   return window
 }
@@ -143,6 +227,7 @@ if (!gotLock) {
   void app.whenReady().then(async () => {
     // app ready 时再设置一次，避免开发模式的 Electron bundle 覆盖名称。
     app.setName(PRODUCT_NAME)
+    windowStateStore = new WindowStateStore()
     const connections = new ConnectionStore()
     const queries = new QueryStore()
     const audit = new AuditStore()

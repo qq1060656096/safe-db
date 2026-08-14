@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
-import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnlockOutlined } from '@vicons/antd'
+import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UndoOutlined, UnlockOutlined } from '@vicons/antd'
 import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NModal, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
 import { isAppLocale, localeOptions } from '../i18n'
 import { invalidateConnectionMetadata, loadColumnMetadata, loadDatabaseMetadata, loadTableMetadata } from '../metadataCache'
 import { useAppStore } from '../stores/app'
+import { useLayoutStore } from '../stores/layout'
 import { useSettingsStore } from '../stores/settings'
 import { toCsv, toJson } from '../utils'
 import ConnectionDialog from './ConnectionDialog.vue'
@@ -25,6 +26,7 @@ interface DbTreeNode extends TreeOption { data: NodeData; children?: DbTreeNode[
 type TreeKey = string | number
 
 const store = useAppStore()
+const layoutStore = useLayoutStore()
 const settings = useSettingsStore()
 const { t } = useI18n()
 const dialog = useDialog()
@@ -73,7 +75,10 @@ const connectionTransferOptions = computed<DropdownOption[]>(() => [
   { key: 'language', label: t('common.language'), children: languageOptions },
   { type: 'divider', key: 'language-divider' },
   { key: 'import', label: t('sidebar.importConnections'), icon: () => h(NIcon, null, { default: () => h(ImportOutlined) }) },
-  { key: 'export', label: t('sidebar.exportConnections'), disabled: store.connections.length === 0, icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }) }
+  { key: 'export', label: t('sidebar.exportConnections'), disabled: store.connections.length === 0, icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }) },
+  { type: 'divider', key: 'layout-divider' },
+  { key: 'reset-current-layout', label: t('layout.resetCurrent'), icon: () => h(NIcon, null, { default: () => h(UndoOutlined) }) },
+  { key: 'reset-all-layout', label: t('layout.resetAll'), icon: () => h(NIcon, null, { default: () => h(UndoOutlined) }) }
 ])
 
 function connectionKey(id: string): string { return `conn:${id}` }
@@ -751,6 +756,18 @@ async function changePermissionMode(connection: ConnectionMeta, value: string | 
     permissionChangingId.value = null
   }
 }
+function openNodeContextMenu(event: MouseEvent, node: DbTreeNode): void {
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenuNode.value = node
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  contextMenuShow.value = true
+}
+function treeNodeProps({ option }: { option: TreeOption }): { onContextmenu: (event: MouseEvent) => void } {
+  const node = option as DbTreeNode
+  return { onContextmenu: (event: MouseEvent) => openNodeContextMenu(event, node) }
+}
 function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
   const node = option as DbTreeNode
   let content: ReturnType<typeof h>
@@ -809,16 +826,7 @@ function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
     const label = node.data.kind === 'database' ? node.data.database : node.data.kind === 'schema' ? node.data.schema : node.data.table
     content = h('span', { class: 'tree-node-title', onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node) }, label)
   }
-  const trigger = h('span', {
-    class: 'tree-context-trigger',
-    onContextmenu: (event: MouseEvent) => {
-      event.preventDefault()
-      contextMenuNode.value = node
-      contextMenuX.value = event.clientX
-      contextMenuY.value = event.clientY
-      contextMenuShow.value = true
-    }
-  }, [content])
+  const trigger = h('span', { class: 'tree-context-trigger' }, [content])
   return node.data.kind === 'table' && node.data.comment
     ? h(NTooltip, { placement: 'right', delay: 600 }, { trigger: () => trigger, default: () => node.data.kind === 'table' ? node.data.comment : '' })
     : trigger
@@ -902,6 +910,21 @@ function openNewQuery(connectionId: string | number): void {
 }
 async function transferConnections(action: string | number): Promise<void> {
   if (isAppLocale(action)) { selectLocale(action); return }
+  if (action === 'reset-current-layout' || action === 'reset-all-layout') {
+    const resetAll = action === 'reset-all-layout'
+    dialog.warning({
+      title: t(resetAll ? 'layout.resetAllTitle' : 'layout.resetCurrentTitle'),
+      content: t(resetAll ? 'layout.resetAllHint' : 'layout.resetCurrentHint'),
+      positiveText: t('layout.reset'),
+      negativeText: t('common.cancel'),
+      onPositiveClick: () => {
+        if (resetAll) layoutStore.resetAll()
+        else layoutStore.resetWorkspaceLayout(layoutStore.activeWindowMode)
+        message.success(t(resetAll ? 'layout.resetAllDone' : 'layout.resetCurrentDone'))
+      }
+    })
+    return
+  }
   try {
     if (action === 'export') {
       const path = await window.api.exportConnections()
@@ -945,7 +968,7 @@ function selectContextMenu(key: string | number): void {
       <NInput v-model:value="search" clearable size="small" :placeholder="t('sidebar.searchPlaceholder')"><template #prefix><NIcon color="#aaa"><SearchOutlined /></NIcon></template></NInput>
       <NButton quaternary size="small" :title="t('sidebar.collapseAll')" :aria-label="t('sidebar.collapseAll')" @click="collapseAll"><template #icon><NIcon><MenuFoldOutlined /></NIcon></template></NButton>
     </div>
-    <div class="sidebar-tree"><NTree remote virtual-scroll block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
+    <div class="sidebar-tree"><NTree remote virtual-scroll block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" :node-props="treeNodeProps" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
     <NDropdown trigger="manual" placement="bottom-start" :show="contextMenuShow" :x="contextMenuX" :y="contextMenuY" :options="contextMenuOptions" @select="selectContextMenu" @clickoutside="contextMenuShow = false" />
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
     <NModal :show="copyModalOpen" :mask-closable="!copyingTable" @update:show="(show) => { if (!show) closeCopyTable() }">

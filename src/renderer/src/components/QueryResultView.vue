@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from 'vue'
-import { CopyOutlined, DownloadOutlined } from '@vicons/antd'
-import { NButton, NDataTable, NDropdown, NIcon, NTag, NText, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
+import { ColumnWidthOutlined, CopyOutlined, DownloadOutlined } from '@vicons/antd'
+import { NButton, NDataTable, NDropdown, NIcon, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { DbType, QueryResult } from '../../../shared/types'
+import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, queryColumnLayoutScope, useLayoutStore } from '../stores/layout'
 import { toCsv, toJson } from '../utils'
 
 const props = defineProps<{
   result: QueryResult
   index: number
   connectionId?: string
+  savedQueryId?: string
   dbType?: DbType
   database?: string
   schema?: string
@@ -17,6 +19,7 @@ const props = defineProps<{
 }>()
 const { t } = useI18n()
 const message = useMessage()
+const layoutStore = useLayoutStore()
 const selectedKeys = ref<Array<string | number>>([])
 const lastSelectedIndex = ref<number | null>(null)
 const rowMenuShow = ref(false)
@@ -32,6 +35,17 @@ const tableRoot = ref<HTMLElement | null>(null)
 const selectedColumnSet = new Set<string>()
 const rows = computed(() => (props.result.rows ?? []).map((row, index) => ({ ...row, __resultKey: index })))
 const columnNames = computed(() => (props.result.columns ?? []).map((column) => column.name))
+const columnLayoutScope = computed(() => queryColumnLayoutScope({
+  connectionId: props.connectionId,
+  database: props.database,
+  savedQueryId: props.savedQueryId,
+  sql: props.sql,
+  resultIndex: props.index,
+  columns: columnNames.value
+}))
+const columnWidths = ref<Record<string, number>>({})
+const tableInstanceKey = ref(0)
+const tableScrollX = computed(() => 104 + columnNames.value.reduce((total, name) => total + (columnWidths.value[name] ?? DEFAULT_COLUMN_WIDTH), 0))
 const selectedColumnNames = computed(() => {
   const selected = new Set(selectedColumns.value)
   return columnNames.value.filter((column) => selected.has(column))
@@ -53,6 +67,10 @@ const columns = computed<DataTableColumns<Record<string, unknown>>>(() =>
         title: `${column.name}\n${t('query.columnSelectionHelp')}`
       }, column.name),
       key: column.name,
+      width: columnWidths.value[column.name] ?? DEFAULT_COLUMN_WIDTH,
+      minWidth: MIN_COLUMN_WIDTH,
+      maxWidth: MAX_COLUMN_WIDTH,
+      resizable: true,
       className: 'copyable-data-column',
       cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
       ellipsis: { tooltip: true },
@@ -125,6 +143,14 @@ watch(() => props.result.rows, () => {
   setSelectedColumns([])
   lastSelectedColumnIndex.value = null
 })
+watch(
+  () => [columnLayoutScope.value, layoutStore.revision],
+  () => {
+    columnWidths.value = layoutStore.getColumnWidths(columnLayoutScope.value)
+    tableInstanceKey.value += 1
+  },
+  { immediate: true }
+)
 
 function updateSelectedKeys(keys: Array<string | number>): void {
   selectedKeys.value = keys
@@ -183,11 +209,27 @@ function openColumnMenu(event: MouseEvent, column: string, kind: 'header' | 'cel
 
 function selectColumnFromHeader(event: MouseEvent): void {
   if (!(event.target instanceof Element)) return
+  if (event.target.closest('[data-data-table-resizable]')) return
   const header = event.target.closest('.n-data-table-th[data-col-key]') as HTMLElement | null
   const column = header?.dataset.colKey
   if (!header || !column || !tableRoot.value?.contains(header) || !columnNames.value.includes(column)) return
   updateColumnSelection(event, column, false)
   if (!event.target.closest('.n-data-table-sorter')) event.stopPropagation()
+}
+
+function updateColumnWidth(
+  _resizedWidth: number,
+  limitedWidth: number,
+  column: DataTableBaseColumn<Record<string, unknown>>
+): void {
+  const key = String(column.key)
+  columnWidths.value = { ...columnWidths.value, [key]: limitedWidth }
+  layoutStore.setColumnWidth(columnLayoutScope.value, key, limitedWidth)
+}
+
+function resetColumnWidths(): void {
+  layoutStore.resetColumnLayout(columnLayoutScope.value)
+  message.success(t('layout.columnsReset'))
 }
 
 function openColumnMenuFromHeader(event: MouseEvent): void {
@@ -457,8 +499,12 @@ async function exportResult(format: string): Promise<void> {
           <template #icon><NIcon><DownloadOutlined /></NIcon></template>
         </NButton>
       </NDropdown>
+      <NButton quaternary size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnWidths">
+        <template #icon><NIcon><ColumnWidthOutlined /></NIcon></template>
+      </NButton>
     </div>
     <NDataTable
+      :key="tableInstanceKey"
       size="small"
       bordered
       flex-height
@@ -470,7 +516,8 @@ async function exportResult(format: string): Promise<void> {
       :row-class-name="resultRowClassName"
       :row-props="(row: Record<string, unknown>) => ({ onClick: (event: MouseEvent) => selectResultRow(event, row), onContextmenu: (event: MouseEvent) => openResultRowMenu(event, row) })"
       :pagination="false"
-      :scroll-x="Math.max(700, columns.length * 160 + 44)"
+      :scroll-x="Math.max(700, tableScrollX)"
+      :on-unstable-column-resize="updateColumnWidth"
       @update:checked-row-keys="updateSelectedKeys"
     />
     <NDropdown trigger="manual" placement="bottom-start" :show="rowMenuShow" :x="rowMenuX" :y="rowMenuY" :options="copyOptions" @select="selectRowMenu" @clickoutside="rowMenuShow = false" />

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onMounted, ref, watch } from 'vue'
-import { CopyOutlined, DeleteOutlined, DownloadOutlined, FilterOutlined, PlusOutlined, ReloadOutlined, SaveOutlined, UndoOutlined } from '@vicons/antd'
-import { NAlert, NButton, NDataTable, NDropdown, NIcon, NInput, NPagination, NSelect, NTag, NText, useMessage, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
+import { ColumnWidthOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FilterOutlined, PlusOutlined, ReloadOutlined, SaveOutlined, UndoOutlined } from '@vicons/antd'
+import { NAlert, NButton, NDataTable, NDropdown, NIcon, NInput, NPagination, NSelect, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ColumnFilter, ColumnInfo, DbType, TableDataResult } from '../../../shared/types'
 import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
+import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, tableColumnLayoutScope, useLayoutStore } from '../stores/layout'
 import { isNumericColumn, toCsv, toJson } from '../utils'
 
 interface NewRow { tempId: string; values: Record<string, unknown> }
@@ -13,6 +14,7 @@ interface FilterInput { op: ColumnFilter['op']; value: string }
 
 const props = defineProps<{ tab: AppTab }>()
 const store = useAppStore()
+const layoutStore = useLayoutStore()
 const { t } = useI18n()
 const message = useMessage()
 const data = ref<TableDataResult | null>(null)
@@ -36,6 +38,14 @@ const selectedColumns = ref<string[]>([])
 const lastSelectedColumnIndex = ref<number | null>(null)
 const tableRoot = ref<HTMLElement | null>(null)
 const selectedColumnSet = new Set<string>()
+const columnLayoutScope = computed(() => tableColumnLayoutScope({
+  connectionId: props.tab.connectionId,
+  database: props.tab.database,
+  schema: props.tab.schema,
+  table: props.tab.table
+}))
+const columnWidths = ref<Record<string, number>>({})
+const tableInstanceKey = ref(0)
 const editingCell = ref<{ rowKey: string; column: string } | null>(null)
 const saving = ref(false)
 const showFilter = ref(false)
@@ -46,6 +56,7 @@ const connection = computed(() => store.connections.find((item) => item.id === p
 const keyColumns = computed(() => data.value?.keyColumns ?? [])
 const baseRows = computed(() => data.value?.rows ?? [])
 const columnNames = computed(() => (data.value?.columns ?? []).map((column) => column.name))
+const tableScrollX = computed(() => 104 + columnNames.value.reduce((total, name) => total + (columnWidths.value[name] ?? DEFAULT_COLUMN_WIDTH), 0))
 const selectedColumnNames = computed(() => {
   const selected = new Set(selectedColumns.value)
   return columnNames.value.filter((column) => selected.has(column))
@@ -153,6 +164,14 @@ async function load(): Promise<void> {
   finally { loading.value = false }
 }
 watch([page, pageSize, orderBy, appliedFilters], load, { deep: true })
+watch(
+  () => [columnLayoutScope.value, layoutStore.revision],
+  () => {
+    columnWidths.value = layoutStore.getColumnWidths(columnLayoutScope.value)
+    tableInstanceKey.value += 1
+  },
+  { immediate: true }
+)
 onMounted(load)
 function resetEdits(): void { edits.value = new Map(); newRows.value = []; deletedKeys.value = new Set(); selectedKeys.value = []; lastSelectedRowIndex.value = null; editingCell.value = null }
 function commitCell(rowKey: string, column: string, raw: string, isNew: boolean): void {
@@ -257,11 +276,26 @@ function displayedValue(row: Record<string, unknown>, column: string): unknown {
 }
 function selectColumnFromHeader(event: MouseEvent): void {
   if (!(event.target instanceof Element)) return
+  if (event.target.closest('[data-data-table-resizable]')) return
   const header = event.target.closest('.n-data-table-th[data-col-key]') as HTMLElement | null
   const column = header?.dataset.colKey
   if (!header || !column || !tableRoot.value?.contains(header) || !columnNames.value.includes(column)) return
   updateColumnSelection(event, column, false)
   if (!event.target.closest('.n-data-table-sorter')) event.stopPropagation()
+}
+
+function updateColumnWidth(
+  _resizedWidth: number,
+  limitedWidth: number,
+  column: DataTableBaseColumn<Record<string, unknown>>
+): void {
+  const key = String(column.key)
+  columnWidths.value = { ...columnWidths.value, [key]: limitedWidth }
+  layoutStore.setColumnWidth(columnLayoutScope.value, key, limitedWidth)
+}
+function resetColumnWidths(): void {
+  layoutStore.resetColumnLayout(columnLayoutScope.value)
+  message.success(t('layout.columnsReset'))
 }
 function openColumnMenuFromHeader(event: MouseEvent): void {
   if (!(event.target instanceof Element)) return
@@ -466,6 +500,10 @@ const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
         title: `${column.name}\n${t('query.columnSelectionHelp')}`
       }, [column.isPrimaryKey ? h('span', { class: 'primary-key', title: t('grid.primaryKey') }, '🔑') : null, column.name, h('small', { class: 'column-type' }, column.dataType)]),
       key: column.name,
+      width: columnWidths.value[column.name] ?? DEFAULT_COLUMN_WIDTH,
+      minWidth: MIN_COLUMN_WIDTH,
+      maxWidth: MAX_COLUMN_WIDTH,
+      resizable: true,
       fixed: column.isPrimaryKey ? 'left' as const : undefined,
       className: 'copyable-data-column',
       cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
@@ -542,6 +580,7 @@ function updateSorter(sorter: DataTableSortState | null): void {
       <NButton size="small" :loading="loading" @click="load"><template #icon><NIcon><ReloadOutlined /></NIcon></template>{{ t('common.refresh') }}</NButton>
       <NButton size="small" :type="showFilter || activeFilterCount ? 'primary' : 'default'" :secondary="activeFilterCount > 0" @click="showFilter = !showFilter"><template #icon><NIcon><FilterOutlined /></NIcon></template>{{ t('grid.filter') }}<template v-if="activeFilterCount"> ({{ activeFilterCount }})</template></NButton>
       <NDropdown :options="exportOptions" :disabled="!data || data.rows.length === 0" @select="onExportSelect"><NButton size="small" :loading="exporting"><template #icon><NIcon><DownloadOutlined /></NIcon></template>{{ t('common.export') }}</NButton></NDropdown>
+      <NButton size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnWidths"><template #icon><NIcon><ColumnWidthOutlined /></NIcon></template>{{ t('layout.resetColumns') }}</NButton>
       <NDropdown trigger="click" :options="rowCopyOptions" :disabled="selectedKeys.length === 0" @select="copySelected"><NButton size="small" :disabled="selectedKeys.length === 0"><template #icon><NIcon><CopyOutlined /></NIcon></template>{{ t('query.copy') }}<template v-if="selectedKeys.length"> ({{ selectedKeys.length }})</template></NButton></NDropdown>
       <NButton size="small" :disabled="!data?.editable" @click="addRow"><template #icon><NIcon><PlusOutlined /></NIcon></template>{{ t('grid.addRow') }}</NButton>
       <NButton size="small" type="error" secondary :disabled="!data?.editable || selectedKeys.length === 0" @click="deleteSelected"><template #icon><NIcon><DeleteOutlined /></NIcon></template>{{ t('grid.deleteRow') }}</NButton>
@@ -562,7 +601,7 @@ function updateSorter(sorter: DataTableSortState | null): void {
     </div>
     <NAlert v-if="data && !data.editable" type="info" class="module-alert">{{ readOnlyHelp }}</NAlert>
     <div ref="tableRoot" class="data-table-wrap padded" @click.capture="selectColumnFromHeader" @contextmenu.capture="openColumnMenuFromHeader">
-      <NDataTable remote size="small" bordered :loading="loading" :columns="tableColumns" :data="tableRows" :row-key="(row: Record<string, unknown>) => String(row.__tempId ?? row.__rowKey)" :checked-row-keys="selectedKeys" :row-class-name="rowClassName" :row-props="(row: Record<string, unknown>) => ({ onClick: (event: MouseEvent) => selectTableRow(event, row), onContextmenu: (event: MouseEvent) => openTableRowMenu(event, row) })" :pagination="false" :scroll-x="Math.max(900, tableColumns.length * 160)" @update:checked-row-keys="updateSelectedKeys" @update:sorter="updateSorter" />
+      <NDataTable :key="tableInstanceKey" remote size="small" bordered :loading="loading" :columns="tableColumns" :data="tableRows" :row-key="(row: Record<string, unknown>) => String(row.__tempId ?? row.__rowKey)" :checked-row-keys="selectedKeys" :row-class-name="rowClassName" :row-props="(row: Record<string, unknown>) => ({ onClick: (event: MouseEvent) => selectTableRow(event, row), onContextmenu: (event: MouseEvent) => openTableRowMenu(event, row) })" :pagination="false" :scroll-x="Math.max(900, tableScrollX)" :on-unstable-column-resize="updateColumnWidth" @update:checked-row-keys="updateSelectedKeys" @update:sorter="updateSorter" />
     </div>
     <NDropdown trigger="manual" placement="bottom-start" :show="rowMenuShow" :x="rowMenuX" :y="rowMenuY" :options="rowCopyOptions" @select="selectTableRowMenu" @clickoutside="rowMenuShow = false" />
     <NDropdown trigger="manual" placement="bottom-start" :show="columnMenuShow" :x="columnMenuX" :y="columnMenuY" :options="columnCopyOptions" @select="copyColumnItem" @clickoutside="columnMenuShow = false" />

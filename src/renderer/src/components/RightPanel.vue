@@ -4,6 +4,7 @@ import { CopyOutlined, HistoryOutlined, ReloadOutlined } from '@vicons/antd'
 import { NButton, NEmpty, NIcon, NSpin, NTag, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, QueryResult } from '../../../shared/types'
+import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
 
 const store = useAppStore()
@@ -12,12 +13,25 @@ const message = useMessage()
 const activeTab = computed(() => store.tabs.find((tab) => tab.id === store.activeTabId))
 const connection = computed(() => store.connections.find((item) => item.id === activeTab.value?.connectionId))
 const savedQuery = computed(() => store.savedQueries.find((query) => query.id === activeTab.value?.savedQueryId))
+const ddlTarget = computed<AppTab | undefined>(() => {
+  const tab = activeTab.value
+  const selection = tab?.type === 'objects' ? tab.objectSelection : undefined
+  if (!tab || !selection) return tab
+  return {
+    ...tab,
+    schema: selection.schema ?? tab.schema,
+    table: selection.kind === 'table' ? selection.name : undefined,
+    routine: selection.kind === 'routine' ? selection.name : undefined,
+    routineType: selection.kind === 'routine' ? selection.routineType : undefined,
+    routineArguments: selection.kind === 'routine' ? selection.routineArguments : undefined
+  }
+})
 const permissionType = computed<'info' | 'warning' | 'success'>(() => {
   if (connection.value?.permissionMode === 'approval') return 'warning'
   if (connection.value?.permissionMode === 'full') return 'success'
   return 'info'
 })
-const objectName = computed(() => activeTab.value?.table ?? activeTab.value?.routine ?? activeTab.value?.title)
+const objectName = computed(() => ddlTarget.value?.table ?? ddlTarget.value?.routine ?? ddlTarget.value?.title)
 const ddl = ref('')
 const ddlError = ref('')
 const ddlLoading = ref(false)
@@ -156,7 +170,7 @@ async function loadRoutineWithReadQuery(tab: NonNullable<typeof activeTab.value>
 }
 
 async function loadDdl(): Promise<void> {
-  const tab = activeTab.value
+  const tab = ddlTarget.value
   const requestId = ++ddlRequestId
   ddl.value = ''
   ddlError.value = ''
@@ -206,7 +220,7 @@ async function copyDdl(): Promise<void> {
 }
 
 watch(
-  () => [activeTab.value?.connectionId, activeTab.value?.database, activeTab.value?.schema, activeTab.value?.table, activeTab.value?.routine, activeTab.value?.routineType, activeTab.value?.routineArguments],
+  () => [ddlTarget.value?.connectionId, ddlTarget.value?.database, ddlTarget.value?.schema, ddlTarget.value?.table, ddlTarget.value?.routine, ddlTarget.value?.routineType, ddlTarget.value?.routineArguments],
   () => { void loadDdl() },
   { immediate: true }
 )
@@ -225,33 +239,33 @@ function openAudit(): void {
         <section class="detail-section">
           <h3>{{ objectName }}</h3>
           <dl class="detail-list">
-            <div><dt>{{ t('panel.type') }}</dt><dd>{{ t(`panel.tabTypes.${activeTab.routine ? 'routine' : activeTab.type}`) }}</dd></div>
+            <div><dt>{{ t('panel.type') }}</dt><dd>{{ t(`panel.tabTypes.${ddlTarget?.routine ? 'routine' : ddlTarget?.table ? 'table' : activeTab.type}`) }}</dd></div>
             <div v-if="connection"><dt>{{ t('panel.connection') }}</dt><dd><span v-if="connection.color" class="connection-color" :style="{ background: connection.color }" />{{ connection.name }}</dd></div>
-            <div v-if="activeTab.database"><dt>{{ t('panel.database') }}</dt><dd>{{ activeTab.database }}</dd></div>
-            <div v-if="activeTab.schema"><dt>{{ t('panel.schema') }}</dt><dd>{{ activeTab.schema }}</dd></div>
-            <div v-if="activeTab.table"><dt>{{ t('panel.table') }}</dt><dd>{{ activeTab.table }}</dd></div>
-            <div v-if="activeTab.routine"><dt>{{ t('panel.routine') }}</dt><dd>{{ activeTab.routine }}<template v-if="activeTab.routineArguments !== undefined">({{ activeTab.routineArguments }})</template></dd></div>
-            <div v-if="activeTab.routineType"><dt>{{ t('panel.routineType') }}</dt><dd>{{ t(`sidebar.routineTypes.${activeTab.routineType}`) }}</dd></div>
+            <div v-if="ddlTarget?.database"><dt>{{ t('panel.database') }}</dt><dd>{{ ddlTarget.database }}</dd></div>
+            <div v-if="ddlTarget?.schema"><dt>{{ t('panel.schema') }}</dt><dd>{{ ddlTarget.schema }}</dd></div>
+            <div v-if="ddlTarget?.table"><dt>{{ t('panel.table') }}</dt><dd>{{ ddlTarget.table }}</dd></div>
+            <div v-if="ddlTarget?.routine"><dt>{{ t('panel.routine') }}</dt><dd>{{ ddlTarget.routine }}<template v-if="ddlTarget.routineArguments !== undefined">({{ ddlTarget.routineArguments }})</template></dd></div>
+            <div v-if="ddlTarget?.routineType"><dt>{{ t('panel.routineType') }}</dt><dd>{{ t(`sidebar.routineTypes.${ddlTarget.routineType}`) }}</dd></div>
             <div v-if="connection"><dt>{{ t('panel.permission') }}</dt><dd><NTag size="small" :type="permissionType">{{ t(`permission.${connection.permissionMode}`) }}</NTag></dd></div>
             <div v-if="activeTab.type === 'query'"><dt>{{ t('panel.queryState') }}</dt><dd><NTag size="small" :type="activeTab.savedQueryId ? 'success' : 'default'">{{ t(activeTab.savedQueryId ? 'panel.savedQuery' : 'panel.temporaryQuery') }}</NTag></dd></div>
             <div v-if="activeTab.type === 'query'"><dt>{{ t('panel.modificationState') }}</dt><dd><NTag size="small" :type="activeTab.dirty ? 'warning' : 'default'">{{ t(activeTab.dirty ? 'query.modified' : 'query.unmodified') }}</NTag></dd></div>
             <div v-if="savedQuery"><dt>{{ t('panel.updatedAt') }}</dt><dd>{{ formatDate(savedQuery.updatedAt) }}</dd></div>
           </dl>
         </section>
-        <section v-if="activeTab.table || activeTab.routine" class="ddl-section">
+        <section v-if="ddlTarget?.table || ddlTarget?.routine" class="ddl-section">
           <header class="ddl-section-header">
-            <h3>{{ t(activeTab.routine ? 'panel.routineDefinition' : 'panel.ddl') }}</h3>
+            <h3>{{ t(ddlTarget?.routine ? 'panel.routineDefinition' : 'panel.ddl') }}</h3>
             <span class="ddl-actions">
               <NButton quaternary circle size="tiny" :title="t('common.refresh')" :loading="ddlLoading" @click="loadDdl">
                 <template #icon><NIcon><ReloadOutlined /></NIcon></template>
               </NButton>
-              <NButton quaternary circle size="tiny" :title="t(activeTab.routine ? 'panel.copyDefinition' : 'panel.copyDdl')" :disabled="!ddl" @click="copyDdl">
+              <NButton quaternary circle size="tiny" :title="t(ddlTarget?.routine ? 'panel.copyDefinition' : 'panel.copyDdl')" :disabled="!ddl" @click="copyDdl">
                 <template #icon><NIcon><CopyOutlined /></NIcon></template>
               </NButton>
             </span>
           </header>
           <div v-if="ddlLoading" class="ddl-loading"><NSpin size="small" /></div>
-          <div v-else-if="ddlError" class="ddl-error">{{ t(activeTab.routine ? 'panel.routineDefinitionLoadFailed' : 'panel.ddlLoadFailed', { error: ddlError }) }}</div>
+          <div v-else-if="ddlError" class="ddl-error">{{ t(ddlTarget?.routine ? 'panel.routineDefinitionLoadFailed' : 'panel.ddlLoadFailed', { error: ddlError }) }}</div>
           <pre v-else-if="ddl" class="ddl-code"><code>{{ ddl }}</code></pre>
         </section>
       </template>

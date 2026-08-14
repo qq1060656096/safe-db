@@ -47,7 +47,21 @@ function focusLine(lineNumber: number): void {
   view.focus()
 }
 
-defineExpose({ getSelectedText, focusLine })
+function replaceText(text: string, selectedOnly: boolean): void {
+  if (!view) return
+  const selection = view.state.selection.main
+  const from = selectedOnly ? selection.from : 0
+  const to = selectedOnly ? selection.to : view.state.doc.length
+  const anchor = selectedOnly ? from : 0
+  view.dispatch({
+    changes: { from, to, insert: text },
+    selection: { anchor, head: anchor + text.length },
+    scrollIntoView: true
+  })
+  view.focus()
+}
+
+defineExpose({ getSelectedText, focusLine, replaceText })
 
 onMounted(() => {
   if (!host.value) return

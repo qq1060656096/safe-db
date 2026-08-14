@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, CopyOutlined, DatabaseOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
+import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, CopyOutlined, DatabaseOutlined, FormatPainterOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
 import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useMessage, type SelectOption } from 'naive-ui'
+import { format as formatSql, type SqlLanguage } from 'sql-formatter'
 import { useI18n } from 'vue-i18n'
-import type { ConnectionMeta, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
+import type { ConnectionMeta, DbType, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
 import {
   connectionMetadataRevision,
   loadColumnMetadata,
@@ -19,6 +20,7 @@ import SqlEditor from './SqlEditor.vue'
 interface SqlEditorHandle {
   getSelectedText(): string
   focusLine(line: number): void
+  replaceText(text: string, selectedOnly: boolean): void
 }
 interface EditorStatus { line: number; column: number; selectionLength: number }
 
@@ -73,6 +75,7 @@ const saveConnection = computed(() => store.connections.find((item) => item.id =
 const editorPlaceholder = computed(() => connection.value?.type === 'mongodb'
   ? t('query.mongodbPlaceholder')
   : connection.value?.type === 'redis' ? t('query.redisPlaceholder') : t('query.placeholder'))
+const canFormat = computed(() => Boolean(value.value.trim()) && connection.value?.type !== 'mongodb' && connection.value?.type !== 'redis')
 let saveDatabaseRequestId = 0
 let databaseOptionsRequestId = 0
 const EDITOR_HEIGHT_KEY = 'safe-db.query.editor-height'
@@ -434,6 +437,33 @@ function locateError(): void {
   if (errorLine.value) sqlEditor.value?.focusLine(errorLine.value)
 }
 
+function sqlFormatterLanguage(type?: DbType): SqlLanguage {
+  if (type === 'mysql') return 'mysql'
+  if (type === 'postgres') return 'postgresql'
+  if (type === 'sqlite') return 'sqlite'
+  if (type === 'sqlserver') return 'transactsql'
+  return 'sql'
+}
+
+function formatQuery(): void {
+  if (!canFormat.value) return
+  const selectedText = sqlEditor.value?.getSelectedText() ?? ''
+  const selectedOnly = Boolean(selectedText.trim())
+  const source = selectedOnly ? selectedText : value.value
+  try {
+    const formatted = formatSql(source, {
+      language: sqlFormatterLanguage(connection.value?.type),
+      tabWidth: 2,
+      keywordCase: 'upper'
+    })
+    if (sqlEditor.value) sqlEditor.value.replaceText(formatted, selectedOnly)
+    else value.value = formatted
+    message.success(t('query.formatted'))
+  } catch (error) {
+    message.error(t('query.formatFailed', { error: error instanceof Error ? error.message : String(error) }))
+  }
+}
+
 defineExpose({ saveForClose })
 </script>
 
@@ -451,6 +481,10 @@ defineExpose({ saveForClose })
       <NButton size="small" :loading="saving" :disabled="!canSave" :title="`${t('query.saveQuery')} (Cmd/Ctrl+S)`" @click="requestSave">
         <template #icon><NIcon><SaveOutlined /></NIcon></template>
         {{ t('query.saveQuery') }}
+      </NButton>
+      <NButton size="small" :disabled="!canFormat" :title="t('query.formatHelp')" @click="formatQuery">
+        <template #icon><NIcon><FormatPainterOutlined /></NIcon></template>
+        {{ t('query.format') }}
       </NButton>
       <span class="query-toolbar-divider" />
       <span class="query-database-label">{{ t('query.database') }}</span>
@@ -521,6 +555,7 @@ defineExpose({ saveForClose })
               :result="result"
               :index="index"
               :connection-id="tab.connectionId"
+              :saved-query-id="tab.savedQueryId"
               :db-type="connection?.type"
               :database="tab.database"
               :schema="tab.schema"
