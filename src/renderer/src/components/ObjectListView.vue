@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, EditOutlined, EyeOutlined, FolderOpenOutlined, FunctionOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnorderedListOutlined } from '@vicons/antd'
 import { NButton, NCard, NCheckbox, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import { connectionMetadataRevision } from '../metadataCache'
 import type { AppTab, ObjectSelection } from '../stores/app'
 import { useAppStore } from '../stores/app'
 
@@ -167,6 +168,13 @@ async function load(): Promise<void> {
   }
 }
 
+watch(
+  () => connectionMetadataRevision(props.tab.connectionId),
+  () => {
+    if (props.tab.objectGroup !== 'queries') void load()
+  }
+)
+
 function openRow(row: ObjectRow): void {
   if (row.kind === 'query' && row.query) {
     store.openSavedQuery(row.query)
@@ -223,6 +231,10 @@ function updateSelectedKeys(keys: Array<string | number>): void {
   setObjectSelection(rows.value.find((row) => row.key === selectedKey.value))
 }
 function selectedCopyRows(): ObjectRow[] {
+  const keys = new Set(selectedKeys.value.length ? selectedKeys.value : selectedKey.value ? [selectedKey.value] : [])
+  return rows.value.filter((row) => keys.has(row.key) && row.table?.type === 'table' && supportsStructure.value)
+}
+function selectedDropRows(): ObjectRow[] {
   const keys = new Set(selectedKeys.value.length ? selectedKeys.value : selectedKey.value ? [selectedKey.value] : [])
   return rows.value.filter((row) => keys.has(row.key) && row.table?.type === 'table' && supportsStructure.value)
 }
@@ -421,7 +433,7 @@ function selectTableContextAction(action: string | number): void {
   else if (action === 'copy') openCopyTables(selectedCopyRows().length ? selectedCopyRows() : [row])
   else if (action === 'clear-table') truncateRow(row)
   else if (action === 'clear-data') clearDataRow(row)
-  else if (action === 'drop') dropRow(row)
+  else if (action === 'drop') dropRows(selectedDropRows().length ? selectedDropRows() : [row])
 }
 function createObject(): void {
   if (props.tab.objectGroup === 'tables' && supportsStructure.value) {
@@ -439,22 +451,28 @@ function designSelected(): void {
   if (!supportsStructure.value || !row?.table || row.table.type !== 'table') return
   store.openTab({ type: 'structure', title: t('sidebar.designTitle', { name: row.table.name }), connectionId: props.tab.connectionId, database: props.tab.database, schema: row.table.schema, table: row.table.name })
 }
-function dropRow(row: ObjectRow): void {
+function dropRows(rowsToDrop: ObjectRow[]): void {
   const currentConnection = connection.value
-  if (dropping.value || !currentConnection || !props.tab.database || !row?.table || row.table.type !== 'table' || !supportsStructure.value) return
-  const tableName = row.table.name
-  const sql = `DROP TABLE ${qualifiedTable(currentConnection.type, props.tab.database, row.table.schema, tableName)};`
+  const database = props.tab.database
+  if (dropping.value || !currentConnection || !database || !supportsStructure.value) return
+  const tableRows = rowsToDrop.filter((row) => row.table?.type === 'table')
+  if (!tableRows.length) return
+  const sql = tableRows
+    .map((row) => `DROP TABLE ${qualifiedTable(currentConnection.type, database, row.table!.schema, row.table!.name)};`)
+    .join('\n')
+  const batch = tableRows.length > 1
+  const tableName = tableRows[0].table!.name
   dialog.error({
-    title: t('sidebar.dropTitle', { name: tableName }),
-    content: t('sidebar.dropHint', { sql }),
+    title: batch ? t('sidebar.dropTablesTitle', { count: tableRows.length }) : t('sidebar.dropTitle', { name: tableName }),
+    content: batch ? t('sidebar.dropTablesHint', { sql }) : t('sidebar.dropHint', { sql }),
     positiveText: t('common.delete'),
     negativeText: t('common.cancel'),
     onPositiveClick: async () => {
       dropping.value = true
       try {
-        const result = await store.executeWithApproval(currentConnection.id, sql, props.tab.database)
+        const result = await store.executeWithApproval(currentConnection.id, sql, database)
         if (result.status === 'ok') {
-          message.success(t('sidebar.dropped', { name: tableName }))
+          message.success(batch ? t('sidebar.tablesDropped', { count: tableRows.length }) : t('sidebar.dropped', { name: tableName }))
           selectedKey.value = null
           selectedKeys.value = []
           store.setObjectSelection(props.tab.id)
@@ -468,7 +486,7 @@ function dropRow(row: ObjectRow): void {
   })
 }
 function dropSelected(): void {
-  if (selectedRow.value) dropRow(selectedRow.value)
+  dropRows(selectedDropRows())
 }
 onMounted(() => {
   void load()
@@ -492,7 +510,7 @@ onBeforeUnmount(() => {
         <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!['tables', 'queries'].includes(tab.objectGroup ?? '') || (tab.objectGroup === 'tables' && !supportsStructure)" @click="createObject"><template #icon><NIcon><PlusOutlined /></NIcon></template></NButton></template>{{ t(tab.objectGroup === 'queries' ? 'sidebar.newQuery' : 'sidebar.newTable') }}</NTooltip>
         <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!selectedRow" @click="openSelected"><template #icon><NIcon><FolderOpenOutlined /></NIcon></template></NButton></template>{{ t('objectList.open') }}</NTooltip>
         <NTooltip><template #trigger><NButton quaternary size="small" :disabled="!supportsStructure || !selectedRow?.table || selectedRow.table.type !== 'table'" @click="designSelected"><template #icon><NIcon><EditOutlined /></NIcon></template></NButton></template>{{ t('sidebar.designTable') }}</NTooltip>
-        <NTooltip><template #trigger><NButton quaternary type="error" size="small" :loading="dropping" :disabled="!supportsStructure || !selectedRow?.table || selectedRow.table.type !== 'table'" @click="dropSelected"><template #icon><NIcon><DeleteOutlined /></NIcon></template></NButton></template>{{ t('sidebar.dropTable') }}</NTooltip>
+        <NTooltip><template #trigger><NButton quaternary type="error" size="small" :loading="dropping" :disabled="selectedDropRows().length === 0" @click="dropSelected"><template #icon><NIcon><DeleteOutlined /></NIcon></template></NButton></template>{{ t('sidebar.dropTable') }}</NTooltip>
         <span class="object-toolbar-separator" />
         <NTooltip><template #trigger><NButton quaternary size="small" :loading="loading" :disabled="tab.objectGroup === 'queries'" @click="load"><template #icon><NIcon><ReloadOutlined /></NIcon></template></NButton></template>{{ t('common.refresh') }}</NTooltip>
       </span>

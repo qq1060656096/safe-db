@@ -314,6 +314,11 @@ async function refreshTables(connectionId: string, database?: string): Promise<v
   await loadDatabaseMetadata(connectionId).catch(() => [])
   setNodeChildren(databaseKey(connectionId, database), await loadDatabaseChildren(connectionId, database))
 }
+function refreshDatabaseTree(connectionId: string, database?: string): void {
+  void refreshTables(connectionId, database).catch((error) => {
+    message.error(error instanceof Error ? error.message : String(error))
+  })
+}
 async function toggleNodeExpanded(node: DbTreeNode): Promise<void> {
   if (node.isLeaf || node.key === undefined || node.key === null) return
   const key = node.key
@@ -625,6 +630,7 @@ function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta):
   const common: DropdownOption[] = [
     { key: 'open', label: t('sidebar.openTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) },
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
+    { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'copy', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }
   ]
   if (tableType === 'view') return common
@@ -656,6 +662,7 @@ function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta):
 function routineOptions(): DropdownOption[] {
   return [
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
+    { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'copy', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }
   ]
 }
@@ -692,14 +699,24 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
   if (node.data.kind === 'database') {
     if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: node.data.database }), connectionId: node.data.connectionId, database: node.data.database })
     else if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database })
+    else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
     return
   }
-  if (node.data.kind === 'schema') { if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema }); return }
-  if (node.data.kind === 'objectGroup') { if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema }); return }
+  if (node.data.kind === 'schema') {
+    if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
+    else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
+    return
+  }
+  if (node.data.kind === 'objectGroup') {
+    if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
+    else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
+    return
+  }
   if (node.data.kind === 'table') {
     if (key === 'open') openTable(node.data)
     else if (key === 'design') store.openTab({ type: 'structure', title: t('sidebar.designTitle', { name: node.data.table }), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema, table: node.data.table })
     else if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: node.data.table }), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
+    else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
     else { const connection = connectionOf(node.data.connectionId); if (connection) void runTableAction(connection, node.data, key) }
     return
   }
@@ -707,6 +724,7 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
     const routine = node.data
     if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.routineTitle', { name: routine.routine }), connectionId: routine.connectionId, database: routine.database, schema: routine.schema, routine: routine.routine, routineType: routine.routineType, routineArguments: routine.arguments })
     else if (key === 'copy') void navigator.clipboard.writeText(routine.routine).then(() => message.success(t('sidebar.copiedObjectName', { name: routine.routine })))
+    else if (key === 'refresh') refreshDatabaseTree(routine.connectionId, routine.database)
   }
 }
 function nodeOptions(node: DbTreeNode): DropdownOption[] {
@@ -723,11 +741,18 @@ function nodeOptions(node: DbTreeNode): DropdownOption[] {
     const connection = connectionOf(node.data.connectionId)
     return [
       { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
+      { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
       ...(isRelational(connection?.type) ? [{ key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : [])
     ]
   }
-  if (node.data.kind === 'schema') return [{ key: 'newTable', label: t('sidebar.newTable') }]
-  if (node.data.kind === 'objectGroup') return node.data.group === 'tables' && isRelational(connectionOf(node.data.connectionId)?.type) ? [{ key: 'newTable', label: t('sidebar.newTable') }] : []
+  if (node.data.kind === 'schema') return [
+    { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
+    { key: 'newTable', label: t('sidebar.newTable') }
+  ]
+  if (node.data.kind === 'objectGroup') return [
+    { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
+    ...(node.data.group === 'tables' && isRelational(connectionOf(node.data.connectionId)?.type) ? [{ key: 'newTable', label: t('sidebar.newTable') }] : [])
+  ]
   if (node.data.kind === 'routine') return routineOptions()
   return tableOptions(node.data.tableType, connectionOf(node.data.connectionId))
 }
