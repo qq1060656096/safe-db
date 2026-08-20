@@ -25,6 +25,12 @@ export interface AppTab {
   routine?: string
   routineType?: 'function' | 'procedure'
   routineArguments?: string
+  /** 由视图或方法定义打开的专用 SQL 编辑页。 */
+  definitionEditor?: boolean
+  /** 查看定义时为只读，不能修改或执行 SQL。 */
+  definitionReadOnly?: boolean
+  definitionKind?: 'view' | 'function' | 'procedure'
+  definitionReplaceMode?: 'replace' | 'drop-create'
   objectGroup?: ObjectGroup
   objectSelection?: ObjectSelection
   sql?: string

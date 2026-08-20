@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, CopyOutlined, DatabaseOutlined, FormatPainterOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
-import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useMessage, type SelectOption } from 'naive-ui'
+import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useDialog, useMessage, type SelectOption } from 'naive-ui'
 import { format as formatSql, type SqlLanguage } from 'sql-formatter'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
@@ -27,6 +27,7 @@ interface EditorStatus { line: number; column: number; selectionLength: number }
 const props = defineProps<{ tab: AppTab }>()
 const store = useAppStore()
 const { t } = useI18n()
+const dialog = useDialog()
 const message = useMessage()
 const value = ref(props.tab.sql ?? '')
 const sqlEditor = ref<SqlEditorHandle | null>(null)
@@ -53,9 +54,15 @@ const saveDatabasesLoading = ref(false)
 const saving = ref(false)
 let closeSaveResolver: ((saved: boolean) => void) | null = null
 const savedQuery = computed(() => store.savedQueries.find((query) => query.id === props.tab.savedQueryId))
+const isDefinitionEditor = computed(() => Boolean(props.tab.definitionEditor))
+const isReadonlyDefinition = computed(() => isDefinitionEditor.value && Boolean(props.tab.definitionReadOnly))
 const savedSqlBaseline = ref(props.tab.savedQueryId ? props.tab.sql ?? '' : '')
-const isDirty = computed(() => value.value !== (props.tab.savedQueryId ? savedSqlBaseline.value : ''))
+const definitionSqlBaseline = ref(props.tab.definitionEditor ? props.tab.sql ?? '' : '')
+const isDirty = computed(() => value.value !== (isDefinitionEditor.value
+  ? definitionSqlBaseline.value
+  : props.tab.savedQueryId ? savedSqlBaseline.value : ''))
 const canSave = computed(() => isDirty.value && Boolean(value.value.trim()) && !saving.value)
+const canApplyDefinition = computed(() => !isReadonlyDefinition.value && canSave.value && connection.value?.permissionMode !== 'readonly' && !running.value && !stopping.value)
 const displayedResponse = computed(() => response.value?.status === 'ok' ? response.value : lastSuccessfulResponse.value)
 const displayedSql = computed(() => response.value?.status === 'ok' ? executedSql.value : lastSuccessfulSql.value)
 const resultRowCount = computed(() => displayedResponse.value?.results?.reduce((count, result) => count + (result.rows?.length ?? 0), 0) ?? 0)
@@ -144,7 +151,9 @@ function normalizeEditorHeight(): void {
 function handleSaveShortcut(event: KeyboardEvent): void {
   if (event.key.toLowerCase() !== 's' || (!event.metaKey && !event.ctrlKey) || event.altKey || store.activeTabId !== props.tab.id) return
   event.preventDefault()
-  if (saveDialogOpen.value) void saveCurrentQuery()
+  if (isReadonlyDefinition.value) return
+  if (isDefinitionEditor.value) void applyDefinition()
+  else if (saveDialogOpen.value) void saveCurrentQuery()
   else void requestSave()
 }
 
@@ -247,18 +256,18 @@ watch(
   { immediate: true }
 )
 
-async function run(selectedSql?: string): Promise<void> {
-  if (running.value || stopping.value) return
+async function run(selectedSql?: string): Promise<boolean> {
+  if (running.value || stopping.value) return false
   const selection = typeof selectedSql === 'string' ? selectedSql : sqlEditor.value?.getSelectedText() ?? ''
   const sqlText = (selection.trim() || value.value.trim())
-  if (!sqlText || !props.tab.connectionId) return
+  if (!sqlText || !props.tab.connectionId) return false
   executedSql.value = sqlText
   const generation = ++runGeneration
   running.value = true
   stopStatus.value = null
   try {
     const result = await store.executeWithApproval(props.tab.connectionId, sqlText, props.tab.database)
-    if (generation !== runGeneration) return
+    if (generation !== runGeneration) return false
     response.value = result
     if (result.status === 'ok') {
       activeResultIndex.value = 0
@@ -267,9 +276,52 @@ async function run(selectedSql?: string): Promise<void> {
     }
     if (result.status === 'denied') message.warning(result.error ?? '')
     else if (result.status === 'error') message.error(result.error ?? '')
+    return result.status === 'ok'
   } finally {
     if (generation === runGeneration) running.value = false
   }
+}
+
+async function applyDefinition(confirmed = false): Promise<boolean> {
+  if (!isDefinitionEditor.value || isReadonlyDefinition.value) return false
+  if (!value.value.trim()) {
+    message.warning(t('query.queryContentRequired'))
+    return false
+  }
+  if (!canApplyDefinition.value) {
+    if (connection.value?.permissionMode === 'readonly') message.warning(t('objectList.definitionReadonly'))
+    return false
+  }
+  if (props.tab.definitionReplaceMode === 'drop-create' && !confirmed) {
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (result: boolean): void => {
+        if (settled) return
+        settled = true
+        resolve(result)
+      }
+      dialog.warning({
+        title: t('objectList.replaceDefinitionTitle'),
+        content: t('objectList.replaceDefinitionWarning', { name: props.tab.table ?? props.tab.routine ?? props.tab.title }),
+        positiveText: t('objectList.continueApplyDefinition'),
+        negativeText: t('common.cancel'),
+        onPositiveClick: async () => finish(await applyDefinition(true)),
+        onNegativeClick: () => finish(false),
+        onClose: () => finish(false)
+      })
+    })
+  }
+  const applied = await run(value.value)
+  if (!applied) return false
+  definitionSqlBaseline.value = value.value
+  message.success(t('objectList.definitionApplied', { name: props.tab.table ?? props.tab.routine ?? props.tab.title }))
+  return true
+}
+
+function runFromEditor(selectedSql: string): void {
+  if (isReadonlyDefinition.value) return
+  if (isDefinitionEditor.value) void applyDefinition()
+  else void run(selectedSql)
 }
 
 async function stop(): Promise<void> {
@@ -408,6 +460,8 @@ function closeSaveDialog(): void {
 
 async function saveForClose(): Promise<boolean> {
   if (!isDirty.value) return true
+  if (isReadonlyDefinition.value) return true
+  if (isDefinitionEditor.value) return applyDefinition()
   if (!value.value.trim()) {
     message.warning(t('query.queryContentRequired'))
     return false
@@ -470,15 +524,15 @@ defineExpose({ saveForClose })
 <template>
   <div ref="queryPage" class="module-page query-editor-page">
     <div class="module-toolbar query-toolbar">
-      <NButton type="primary" size="small" :loading="running" :disabled="stopping" :title="t('query.runSelectionHelp')" @click="run()">
-        <template #icon><NIcon><CaretRightOutlined /></NIcon></template>
-        {{ t('query.run') }}
+      <NButton v-if="!isReadonlyDefinition" type="primary" size="small" :loading="running" :disabled="isDefinitionEditor ? !canApplyDefinition : stopping" :title="t(isDefinitionEditor ? 'objectList.applyDefinitionHelp' : 'query.runSelectionHelp')" @click="isDefinitionEditor ? applyDefinition() : run()">
+        <template #icon><NIcon><component :is="isDefinitionEditor ? SaveOutlined : CaretRightOutlined" /></NIcon></template>
+        {{ t(isDefinitionEditor ? 'objectList.applyDefinition' : 'query.run') }}
       </NButton>
-      <NButton type="error" secondary size="small" :disabled="!running || stopping" :loading="stopping" @click="stop">
+      <NButton v-if="!isReadonlyDefinition" type="error" secondary size="small" :disabled="!running || stopping" :loading="stopping" @click="stop">
         <template #icon><NIcon><StopOutlined /></NIcon></template>
         {{ t('query.stop') }}
       </NButton>
-      <NButton size="small" :loading="saving" :disabled="!canSave" :title="`${t('query.saveQuery')} (Cmd/Ctrl+S)`" @click="requestSave">
+      <NButton v-if="!isDefinitionEditor" size="small" :loading="saving" :disabled="!canSave" :title="`${t('query.saveQuery')} (Cmd/Ctrl+S)`" @click="requestSave">
         <template #icon><NIcon><SaveOutlined /></NIcon></template>
         {{ t('query.saveQuery') }}
       </NButton>
@@ -493,6 +547,7 @@ defineExpose({ saveForClose })
         size="small"
         filterable
         clearable
+        :disabled="isDefinitionEditor"
         :loading="databasesLoading"
         :value="tab.database ?? null"
         :options="databaseOptions"
@@ -500,9 +555,9 @@ defineExpose({ saveForClose })
         @update:value="selectDatabase"
         @update:show="onDatabaseSelectShow"
       />
-      <NTooltip trigger="hover"><template #trigger><span class="keyboard-hint">⌘⏎</span></template>Cmd/Ctrl + Enter</NTooltip>
+      <NTooltip v-if="!isReadonlyDefinition" trigger="hover"><template #trigger><span class="keyboard-hint">⌘⏎</span></template>Cmd/Ctrl + Enter</NTooltip>
       <NTooltip trigger="hover"><template #trigger><span class="keyboard-hint">⌃Space</span></template>{{ t('query.completionShortcut') }}</NTooltip>
-      <NButton quaternary size="small" :aria-label="t('common.clear')" @click="clear">
+      <NButton v-if="!isReadonlyDefinition" quaternary size="small" :aria-label="t('common.clear')" @click="clear">
         <template #icon><NIcon><ClearOutlined /></NIcon></template>
       </NButton>
       <span class="query-toolbar-spacer" />
@@ -511,12 +566,13 @@ defineExpose({ saveForClose })
         {{ t('sidebar.newQuery') }}
       </NButton>
     </div>
-    <div class="editor-wrap" :style="{ height: `${editorHeight}px` }"><SqlEditor ref="sqlEditor" v-model="value" :placeholder="editorPlaceholder" :completion="completion" @run="run" @status="editorStatus = $event" /></div>
+    <div class="editor-wrap" :style="{ height: `${editorHeight}px` }"><SqlEditor ref="sqlEditor" v-model="value" :placeholder="editorPlaceholder" :completion="completion" :read-only="isReadonlyDefinition" @run="runFromEditor" @status="editorStatus = $event" /></div>
     <div class="query-status-bar">
       <span class="query-status-location"><i class="query-status-dot" :style="{ background: connection?.color || '#18a058' }" />{{ connection?.name ?? '-' }}<template v-if="tab.database"> / {{ tab.database }}</template></span>
       <span>{{ t('query.cursorPosition', { line: editorStatus.line, column: editorStatus.column }) }}</span>
       <span v-if="editorStatus.selectionLength">{{ t('query.selectedCharacters', { count: editorStatus.selectionLength }) }}</span>
-      <span v-if="connection">{{ t(`permission.${connection.permissionMode}`) }}</span>
+      <span v-if="isReadonlyDefinition">{{ t('objectList.definitionViewMode') }}</span>
+      <span v-else-if="connection">{{ t(`permission.${connection.permissionMode}`) }}</span>
       <span v-if="displayedResponse?.durationMs !== undefined">{{ t('common.duration', { value: displayedResponse.durationMs }) }}</span>
       <span v-if="hasRowResult">{{ t('query.rowsCount', { count: resultRowCount }) }}</span>
       <span class="query-status-spacer" />

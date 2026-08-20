@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
 import { isAppLocale, localeOptions } from '../i18n'
 import { invalidateConnectionMetadata, loadColumnMetadata, loadDatabaseMetadata, loadTableMetadata } from '../metadataCache'
+import { loadObjectDefinition, openObjectDefinitionTab, type ObjectDefinitionTarget } from '../objectDefinition'
 import { useAppStore } from '../stores/app'
 import { useLayoutStore } from '../stores/layout'
 import { useSettingsStore } from '../stores/settings'
@@ -50,6 +51,7 @@ const copySource = ref<Extract<NodeData, { kind: 'table' }> | null>(null)
 const copyTargetName = ref('')
 const copyWithData = ref(true)
 const copyingTable = ref(false)
+let definitionRequest = 0
 
 const permissionType: Record<PermissionMode, 'info' | 'warning' | 'success'> = { readonly: 'info', approval: 'warning', full: 'success' }
 function renderConnectionTypeIcon(connection: ConnectionMeta): ReturnType<typeof h> {
@@ -633,7 +635,12 @@ function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta):
     { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'copy', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }
   ]
-  if (tableType === 'view') return common
+  if (tableType === 'view') return [
+    common[0],
+    { key: 'view-definition', label: t('objectList.viewViewDefinition'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
+    { key: 'edit-definition', label: t('objectList.editViewDefinition'), disabled: connection?.permissionMode === 'readonly', icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
+    ...common.slice(1)
+  ]
   if (!isRelational(connection?.type)) return [
     common[0], ...common.slice(1),
     { key: 'export-data', label: t('sidebar.exportData'), icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }), children: [
@@ -659,12 +666,70 @@ function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta):
     { key: 'drop', label: t('sidebar.dropTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
   ]
 }
-function routineOptions(): DropdownOption[] {
+function routineOptions(node: Extract<NodeData, { kind: 'routine' }>, connection?: ConnectionMeta): DropdownOption[] {
   return [
+    {
+      key: 'view-definition',
+      label: t(node.routineType === 'procedure' ? 'objectList.viewProcedureDefinition' : 'objectList.viewFunctionDefinition'),
+      icon: () => h(NIcon, null, { default: () => h(CodeOutlined) })
+    },
+    {
+      key: 'edit-definition',
+      label: t(node.routineType === 'procedure' ? 'objectList.editProcedureDefinition' : 'objectList.editFunctionDefinition'),
+      disabled: connection?.permissionMode === 'readonly',
+      icon: () => h(NIcon, null, { default: () => h(EditOutlined) })
+    },
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
     { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'copy', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }
   ]
+}
+function definitionTargetOf(node: Extract<NodeData, { kind: 'table' | 'routine' }>): ObjectDefinitionTarget | null {
+  if (node.kind === 'table') {
+    if (node.tableType !== 'view' || !node.database) return null
+    return {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: node.schema,
+      name: node.table,
+      kind: 'view'
+    }
+  }
+  return {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    name: node.routine,
+    kind: node.routineType,
+    arguments: node.arguments
+  }
+}
+function definitionTabTitle(target: ObjectDefinitionTarget, readOnly: boolean): string {
+  if (readOnly) {
+    const key = target.kind === 'view'
+      ? 'objectList.viewDefinitionTitle'
+      : target.kind === 'procedure' ? 'objectList.procedureDefinitionTitle' : 'objectList.functionDefinitionTitle'
+    return t(key, { name: target.name })
+  }
+  const key = target.kind === 'view'
+    ? 'objectList.editViewTitle'
+    : target.kind === 'procedure' ? 'objectList.editProcedureTitle' : 'objectList.editFunctionTitle'
+  return t(key, { name: target.name })
+}
+async function openDefinition(node: Extract<NodeData, { kind: 'table' | 'routine' }>, readOnly: boolean): Promise<void> {
+  const target = definitionTargetOf(node)
+  const connection = connectionOf(node.connectionId)
+  if (!target || !connection) return
+  const request = ++definitionRequest
+  try {
+    const code = await loadObjectDefinition(target)
+    if (request !== definitionRequest) return
+    openObjectDefinitionTab(store, connection, target, code, readOnly, definitionTabTitle(target, readOnly))
+  } catch (error) {
+    if (request === definitionRequest) {
+      message.error(t('objectList.definitionLoadFailed', { error: error instanceof Error ? error.message : String(error) }))
+    }
+  }
 }
 function onNodeAction(node: DbTreeNode, action: string | number): void {
   const key = String(action)
@@ -715,6 +780,8 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
   if (node.data.kind === 'table') {
     if (key === 'open') openTable(node.data)
     else if (key === 'design') store.openTab({ type: 'structure', title: t('sidebar.designTitle', { name: node.data.table }), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema, table: node.data.table })
+    else if (key === 'view-definition') void openDefinition(node.data, true)
+    else if (key === 'edit-definition') void openDefinition(node.data, false)
     else if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: node.data.table }), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
     else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
     else { const connection = connectionOf(node.data.connectionId); if (connection) void runTableAction(connection, node.data, key) }
@@ -722,7 +789,9 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
   }
   if (node.data.kind === 'routine') {
     const routine = node.data
-    if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.routineTitle', { name: routine.routine }), connectionId: routine.connectionId, database: routine.database, schema: routine.schema, routine: routine.routine, routineType: routine.routineType, routineArguments: routine.arguments })
+    if (key === 'view-definition') void openDefinition(routine, true)
+    else if (key === 'edit-definition') void openDefinition(routine, false)
+    else if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.routineTitle', { name: routine.routine }), connectionId: routine.connectionId, database: routine.database, schema: routine.schema, routine: routine.routine, routineType: routine.routineType, routineArguments: routine.arguments })
     else if (key === 'copy') void navigator.clipboard.writeText(routine.routine).then(() => message.success(t('sidebar.copiedObjectName', { name: routine.routine })))
     else if (key === 'refresh') refreshDatabaseTree(routine.connectionId, routine.database)
   }
@@ -753,7 +822,7 @@ function nodeOptions(node: DbTreeNode): DropdownOption[] {
     { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     ...(node.data.group === 'tables' && isRelational(connectionOf(node.data.connectionId)?.type) ? [{ key: 'newTable', label: t('sidebar.newTable') }] : [])
   ]
-  if (node.data.kind === 'routine') return routineOptions()
+  if (node.data.kind === 'routine') return routineOptions(node.data, connectionOf(node.data.connectionId))
   return tableOptions(node.data.tableType, connectionOf(node.data.connectionId))
 }
 function objectGroupLabel(group: Extract<NodeData, { kind: 'objectGroup' }>['group']): string {

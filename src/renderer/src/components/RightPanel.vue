@@ -4,6 +4,7 @@ import { CopyOutlined, HistoryOutlined, ReloadOutlined } from '@vicons/antd'
 import { NButton, NEmpty, NIcon, NSpin, NTag, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, QueryResult } from '../../../shared/types'
+import { connectionMetadataRevision } from '../metadataCache'
 import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
 
@@ -220,7 +221,7 @@ async function copyDdl(): Promise<void> {
 }
 
 watch(
-  () => [ddlTarget.value?.connectionId, ddlTarget.value?.database, ddlTarget.value?.schema, ddlTarget.value?.table, ddlTarget.value?.routine, ddlTarget.value?.routineType, ddlTarget.value?.routineArguments],
+  () => [ddlTarget.value?.connectionId, ddlTarget.value?.database, ddlTarget.value?.schema, ddlTarget.value?.table, ddlTarget.value?.routine, ddlTarget.value?.routineType, ddlTarget.value?.routineArguments, connectionMetadataRevision(ddlTarget.value?.connectionId)],
   () => { void loadDdl() },
   { immediate: true }
 )
@@ -247,7 +248,7 @@ function openAudit(): void {
             <div v-if="ddlTarget?.routine"><dt>{{ t('panel.routine') }}</dt><dd>{{ ddlTarget.routine }}<template v-if="ddlTarget.routineArguments !== undefined">({{ ddlTarget.routineArguments }})</template></dd></div>
             <div v-if="ddlTarget?.routineType"><dt>{{ t('panel.routineType') }}</dt><dd>{{ t(`sidebar.routineTypes.${ddlTarget.routineType}`) }}</dd></div>
             <div v-if="connection"><dt>{{ t('panel.permission') }}</dt><dd><NTag size="small" :type="permissionType">{{ t(`permission.${connection.permissionMode}`) }}</NTag></dd></div>
-            <div v-if="activeTab.type === 'query'"><dt>{{ t('panel.queryState') }}</dt><dd><NTag size="small" :type="activeTab.savedQueryId ? 'success' : 'default'">{{ t(activeTab.savedQueryId ? 'panel.savedQuery' : 'panel.temporaryQuery') }}</NTag></dd></div>
+            <div v-if="activeTab.type === 'query' && !activeTab.definitionEditor"><dt>{{ t('panel.queryState') }}</dt><dd><NTag size="small" :type="activeTab.savedQueryId ? 'success' : 'default'">{{ t(activeTab.savedQueryId ? 'panel.savedQuery' : 'panel.temporaryQuery') }}</NTag></dd></div>
             <div v-if="activeTab.type === 'query'"><dt>{{ t('panel.modificationState') }}</dt><dd><NTag size="small" :type="activeTab.dirty ? 'warning' : 'default'">{{ t(activeTab.dirty ? 'query.modified' : 'query.unmodified') }}</NTag></dd></div>
             <div v-if="savedQuery"><dt>{{ t('panel.updatedAt') }}</dt><dd>{{ formatDate(savedQuery.updatedAt) }}</dd></div>
           </dl>

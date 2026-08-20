@@ -5,7 +5,9 @@ import { basicSetup } from 'codemirror'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sqlCompletionExtension, type SqlCompletionCatalog } from '../sqlCompletion'
 
-const props = defineProps<{ modelValue: string; placeholder: string; completion: SqlCompletionCatalog }>()
+const props = withDefaults(defineProps<{ modelValue: string; placeholder: string; completion: SqlCompletionCatalog; readOnly?: boolean }>(), {
+  readOnly: false
+})
 interface SqlEditorStatus {
   line: number
   column: number
@@ -19,6 +21,7 @@ const emit = defineEmits<{
 }>()
 const host = ref<HTMLDivElement | null>(null)
 const sqlLanguage = new Compartment()
+const readOnlyMode = new Compartment()
 let view: EditorView | null = null
 let applyingExternalValue = false
 
@@ -72,10 +75,17 @@ onMounted(() => {
       extensions: [
         basicSetup,
         sqlLanguage.of(sqlCompletionExtension(props.completion)),
+        readOnlyMode.of([
+          EditorState.readOnly.of(props.readOnly),
+          EditorView.editable.of(!props.readOnly)
+        ]),
         placeholderExtension(props.placeholder),
-        Prec.high(keymap.of([{ key: 'Mod-Enter', run: () => { emit('run', getSelectedText()); return true } }])),
+        Prec.high(keymap.of([{ key: 'Mod-Enter', run: () => {
+          if (!props.readOnly) emit('run', getSelectedText())
+          return true
+        } }])),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged && !applyingExternalValue) emit('update:modelValue', update.state.doc.toString())
+          if (update.docChanged && !applyingExternalValue && !props.readOnly) emit('update:modelValue', update.state.doc.toString())
           if (update.docChanged || update.selectionSet) emitStatus()
         })
       ]
@@ -97,6 +107,16 @@ watch(
 watch(
   () => props.completion,
   (completion) => view?.dispatch({ effects: sqlLanguage.reconfigure(sqlCompletionExtension(completion)) })
+)
+
+watch(
+  () => props.readOnly,
+  (readOnly) => view?.dispatch({
+    effects: readOnlyMode.reconfigure([
+      EditorState.readOnly.of(readOnly),
+      EditorView.editable.of(!readOnly)
+    ])
+  })
 )
 
 onBeforeUnmount(() => view?.destroy())

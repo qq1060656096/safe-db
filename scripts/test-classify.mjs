@@ -81,5 +81,23 @@ for (const [expect, note, sql] of CASES) {
   if (!ok) fail++
   console.log(`${ok ? '✔' : '✘'} [${expect}]${' '.repeat(Math.max(0, 6 - expect.length))}${note}${ok ? '' : `  → 实得 ${got}`}  | ${JSON.stringify(sql).slice(0, 60)}`)
 }
-console.log(fail ? `\n== ${fail} 项失败 ==` : `\n== 全部 ${CASES.length} 项通过 ==`)
+const SPLIT_CASES = [
+  [
+    'PostgreSQL 方法体保持为一条语句',
+    'CREATE OR REPLACE FUNCTION f() RETURNS void AS $body$ BEGIN PERFORM 1; PERFORM 2; END; $body$ LANGUAGE plpgsql;',
+    1
+  ],
+  [
+    'DELIMITER 包裹的方法体不按内部分号切分',
+    'DROP PROCEDURE IF EXISTS `p`;\nDELIMITER $$\nCREATE PROCEDURE `p`() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;',
+    2
+  ]
+]
+for (const [note, sql, expectedCount] of SPLIT_CASES) {
+  const statements = classifySql(sql).statements
+  const ok = statements.length === expectedCount && statements.every((item) => item.kind === 'DDL')
+  if (!ok) fail++
+  console.log(`${ok ? '✔' : '✘'} [SPLIT] ${note}${ok ? '' : `  → 实得 ${statements.length} 条：${JSON.stringify(statements)}`}`)
+}
+console.log(fail ? `\n== ${fail} 项失败 ==` : `\n== 全部 ${CASES.length + SPLIT_CASES.length} 项通过 ==`)
 process.exit(fail ? 1 : 0)

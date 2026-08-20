@@ -387,7 +387,7 @@ function closeOverlayPanels(): void {
                   <span v-if="tab.dirty" class="workspace-tab-dirty" :aria-label="t('tabs.unsavedChanges')">●</span>
                 </span>
               </template>
-              <span>{{ tab.title }}<template v-if="tab.connectionId"> · {{ store.connections.find((item) => item.id === tab.connectionId)?.name ?? '-' }}</template><template v-if="tab.database"> / {{ tab.database }}</template> · {{ t(tab.savedQueryId ? 'tabs.savedQuery' : 'tabs.temporaryQuery') }}</span>
+              <span>{{ tab.title }}<template v-if="tab.connectionId"> · {{ store.connections.find((item) => item.id === tab.connectionId)?.name ?? '-' }}</template><template v-if="tab.database"> / {{ tab.database }}</template> · {{ t(tab.definitionEditor ? 'tabs.objectDefinition' : tab.savedQueryId ? 'tabs.savedQuery' : 'tabs.temporaryQuery') }}</span>
             </NTooltip>
           </template>
           <QueryEditor v-if="tab.type === 'query'" :ref="(instance) => setQueryEditorRef(tab.id, instance)" :tab="tab" />
@@ -416,8 +416,8 @@ function closeOverlayPanels(): void {
     <div class="workspace-right"><RightPanel /></div>
     <ApprovalModal />
     <NModal :show="Boolean(closePromptTab)" :mask-closable="false">
-      <NCard class="close-query-modal" :title="t('tabs.unsavedCloseTitle')" :closable="!closeSaving" @close="cancelPendingClose">
-        <p>{{ t('tabs.unsavedCloseMessage', { name: closePromptTab?.title ?? '' }) }}</p>
+      <NCard class="close-query-modal" :title="t(closePromptTab?.definitionEditor ? 'tabs.unsavedDefinitionCloseTitle' : 'tabs.unsavedCloseTitle')" :closable="!closeSaving" @close="cancelPendingClose">
+        <p>{{ t(closePromptTab?.definitionEditor ? 'tabs.unsavedDefinitionCloseMessage' : 'tabs.unsavedCloseMessage', { name: closePromptTab?.title ?? '' }) }}</p>
         <template #footer>
           <NSpace justify="end">
             <NButton :disabled="closeSaving" @click="cancelPendingClose">{{ t('common.cancel') }}</NButton>
