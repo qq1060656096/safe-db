@@ -146,6 +146,7 @@ body.query-resizing, body.query-resizing * { cursor: row-resize !important; user
 .filter-actions { display: flex; gap: 7px; margin-top: 8px; }
 .table-name-input { width: min(220px, 45vw); }
 .copy-table-modal { width: min(480px, calc(100vw - 32px)); }
+.object-definition-modal { width: min(720px, calc(100vw - 32px)); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .object-list-toolbar { min-height: 40px; flex-wrap: nowrap; padding: 4px 9px; }
 .object-list-toolbar .n-input { width: min(250px, 36vw); margin-left: 4px; }

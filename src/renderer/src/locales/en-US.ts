@@ -29,6 +29,16 @@ const locale = {
     dropTablesHint: 'The selected tables and all their data will be permanently deleted.',
     tablesDropped: 'Dropped {count} tables'
   },
+  objectList: {
+    ...baseLocale.objectList,
+    viewViewDefinition: 'View definition',
+    viewFunctionDefinition: 'View function definition',
+    viewProcedureDefinition: 'View procedure definition',
+    viewDefinitionTitle: 'View “{name}” definition',
+    functionDefinitionTitle: 'Function “{name}” definition',
+    procedureDefinitionTitle: 'Procedure “{name}” definition',
+    definitionLoadFailed: 'Failed to load definition: {error}'
+  },
   query: {
     ...baseLocale.query,
     copyColumnsWithHeaders: 'Copy names and values ({count} columns)',

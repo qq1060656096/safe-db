@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, EditOutlined, EyeOutlined, FolderOpenOutlined, FunctionOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnorderedListOutlined } from '@vicons/antd'
-import { NAlert, NButton, NCard, NCheckbox, NCode, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
+import { NAlert, NButton, NCard, NCheckbox, NCode, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NSpin, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
 import { connectionMetadataRevision } from '../metadataCache'
@@ -51,6 +51,12 @@ const tableContextShow = ref(false)
 const tableContextX = ref(0)
 const tableContextY = ref(0)
 const tableContextRow = ref<ObjectRow | null>(null)
+const definitionModalOpen = ref(false)
+const definitionTitle = ref('')
+const definitionCode = ref('')
+const definitionError = ref('')
+const definitionLoading = ref(false)
+let definitionRequest = 0
 let shortcutScopeActive = false
 
 const queryRows = computed<ObjectRow[]>(() => store.savedQueries
@@ -65,10 +71,23 @@ const connection = computed(() => store.connections.find((item) => item.id === p
 const supportsStructure = computed(() => connection.value?.type !== 'mongodb' && connection.value?.type !== 'redis')
 const tableContextOptions = computed<DropdownOption[]>(() => {
   const row = tableContextRow.value
-  if (!row?.table) return []
+  if (!row) return []
+  if (row.routine) return [
+    { key: 'open', label: t('objectList.open'), icon: () => h(NIcon, null, { default: () => h(FolderOpenOutlined) }) },
+    {
+      key: 'definition',
+      label: t(row.routine.type === 'procedure' ? 'objectList.viewProcedureDefinition' : 'objectList.viewFunctionDefinition'),
+      icon: () => h(NIcon, null, { default: () => h(CodeOutlined) })
+    }
+  ]
+  if (!row.table) return []
   return [
     { key: 'open', label: t('sidebar.openTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) },
+    ...(row.table.type === 'view' ? [
+      { key: 'definition', label: t('objectList.viewViewDefinition'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) }
+    ] : []),
     ...(row.table.type === 'table' && supportsStructure.value ? [
+      { key: 'design', label: t('sidebar.designTable'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
       { key: 'copy', label: t('sidebar.copyTable'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
       { type: 'divider' as const, key: 'table-action-divider' },
       { key: 'clear-table', label: t('sidebar.truncateTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(ClearOutlined) }) },
@@ -270,7 +289,7 @@ function handleCopyShortcut(event: KeyboardEvent): void {
 }
 function openSelected(): void { if (selectedRow.value) openRow(selectedRow.value) }
 function openTableContext(event: MouseEvent, row: ObjectRow): void {
-  if (!row.table) return
+  if (!row.table && !row.routine) return
   event.preventDefault()
   event.stopPropagation()
   if (selectedKeys.value.includes(row.key)) {
@@ -282,6 +301,48 @@ function openTableContext(event: MouseEvent, row: ObjectRow): void {
   tableContextX.value = event.clientX
   tableContextY.value = event.clientY
   tableContextShow.value = true
+}
+function definitionTitleOf(row: ObjectRow): string {
+  if (row.table?.type === 'view') return t('objectList.viewDefinitionTitle', { name: row.table.name })
+  if (row.routine?.type === 'procedure') return t('objectList.procedureDefinitionTitle', { name: row.routine.name })
+  return t('objectList.functionDefinitionTitle', { name: row.routine?.name ?? row.name })
+}
+async function openDefinition(row: ObjectRow): Promise<void> {
+  const database = props.tab.database
+  if (!props.tab.connectionId || !database || (!row.table && !row.routine)) return
+  const request = ++definitionRequest
+  definitionModalOpen.value = true
+  definitionTitle.value = definitionTitleOf(row)
+  definitionCode.value = ''
+  definitionError.value = ''
+  definitionLoading.value = true
+  try {
+    const code = row.routine
+      ? await window.api.getRoutineDefinition(
+          props.tab.connectionId,
+          database,
+          row.routine.name,
+          row.routine.type,
+          row.routine.schema,
+          row.routine.arguments
+        )
+      : await window.api.getObjectDdl(props.tab.connectionId, database, row.table!.name, row.table!.schema)
+    if (request === definitionRequest) definitionCode.value = code
+  } catch (error) {
+    if (request === definitionRequest) definitionError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (request === definitionRequest) definitionLoading.value = false
+  }
+}
+function closeDefinition(): void {
+  definitionRequest += 1
+  definitionModalOpen.value = false
+  definitionLoading.value = false
+}
+async function copyDefinition(): Promise<void> {
+  if (!definitionCode.value) return
+  await navigator.clipboard.writeText(definitionCode.value)
+  message.success(t('common.copied'))
 }
 function clearRow(row: ObjectRow, action: 'table' | 'data'): void {
   const table = row.table
@@ -430,6 +491,8 @@ function selectTableContextAction(action: string | number): void {
   tableContextRow.value = null
   if (!row) return
   if (action === 'open') openRow(row)
+  else if (action === 'design') designRow(row)
+  else if (action === 'definition') void openDefinition(row)
   else if (action === 'copy') openCopyTables(selectedCopyRows().length ? selectedCopyRows() : [row])
   else if (action === 'clear-table') truncateRow(row)
   else if (action === 'clear-data') clearDataRow(row)
@@ -446,10 +509,12 @@ function createObject(): void {
     })
   }
 }
-function designSelected(): void {
-  const row = selectedRow.value
+function designRow(row: ObjectRow): void {
   if (!supportsStructure.value || !row?.table || row.table.type !== 'table') return
   store.openTab({ type: 'structure', title: t('sidebar.designTitle', { name: row.table.name }), connectionId: props.tab.connectionId, database: props.tab.database, schema: row.table.schema, table: row.table.name })
+}
+function designSelected(): void {
+  if (selectedRow.value) designRow(selectedRow.value)
 }
 function dropRows(rowsToDrop: ObjectRow[]): void {
   const currentConnection = connection.value
@@ -551,6 +616,19 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <NDropdown trigger="manual" placement="bottom-start" :show="tableContextShow" :x="tableContextX" :y="tableContextY" :options="tableContextOptions" @select="selectTableContextAction" @clickoutside="tableContextShow = false" />
+    <NModal :show="definitionModalOpen" @update:show="(show) => { if (!show) closeDefinition() }">
+      <NCard class="object-definition-modal" :title="definitionTitle" closable @close="closeDefinition">
+        <div v-if="definitionLoading" class="ddl-loading"><NSpin size="small" /></div>
+        <NAlert v-else-if="definitionError" type="error">{{ t('objectList.definitionLoadFailed', { error: definitionError }) }}</NAlert>
+        <NCode v-else :code="definitionCode" language="sql" word-wrap class="approval-code" />
+        <template #footer>
+          <div class="modal-actions">
+            <NButton @click="closeDefinition">{{ t('common.close') }}</NButton>
+            <NButton type="primary" :disabled="!definitionCode" @click="copyDefinition">{{ t('panel.copyDefinition') }}</NButton>
+          </div>
+        </template>
+      </NCard>
+    </NModal>
     <NModal :show="copyModalOpen" :mask-closable="!copyingTable" @update:show="(show) => { if (!show) closeCopyTable() }">
       <NCard class="copy-table-modal" :title="t('sidebar.copyTableTitle', { name: copySource?.table?.name ?? '' })" closable @close="closeCopyTable">
         <NFormItem :label="t('sidebar.copyTableTarget')" required>
