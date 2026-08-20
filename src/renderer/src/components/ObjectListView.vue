@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, EditOutlined, EyeOutlined, FolderOpenOutlined, FunctionOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnorderedListOutlined } from '@vicons/antd'
-import { NButton, NCard, NCheckbox, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
+import { NAlert, NButton, NCard, NCheckbox, NCode, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
 import { connectionMetadataRevision } from '../metadataCache'
@@ -463,8 +463,14 @@ function dropRows(rowsToDrop: ObjectRow[]): void {
   const batch = tableRows.length > 1
   const tableName = tableRows[0].table!.name
   dialog.error({
+    style: { width: 'min(640px, calc(100vw - 32px))' },
     title: batch ? t('sidebar.dropTablesTitle', { count: tableRows.length }) : t('sidebar.dropTitle', { name: tableName }),
-    content: batch ? t('sidebar.dropTablesHint', { sql }) : t('sidebar.dropHint', { sql }),
+    content: () => h('div', null, [
+      h(NAlert, { type: 'error', class: 'approval-warning' }, {
+        default: () => t(batch ? 'sidebar.dropTablesHint' : 'sidebar.dropWarning')
+      }),
+      h(NCode, { code: sql, language: 'sql', wordWrap: true, class: 'approval-code' })
+    ]),
     positiveText: t('common.delete'),
     negativeText: t('common.cancel'),
     onPositiveClick: async () => {

@@ -25,7 +25,8 @@ const locale = {
     copyTableBatchHint: 'The selected tables will be copied as “original_name_copy”; copying stops if a target table already exists.',
     tablesCopied: 'Duplicated {count} tables',
     dropTablesTitle: 'Drop {count} tables?',
-    dropTablesHint: 'The selected tables and all their data will be permanently deleted. Execute: {sql}',
+    dropWarning: 'The table and all its data will be permanently deleted.',
+    dropTablesHint: 'The selected tables and all their data will be permanently deleted.',
     tablesDropped: 'Dropped {count} tables'
   },
   query: {
