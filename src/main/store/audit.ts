@@ -133,6 +133,7 @@ export class AuditStore {
         connectionName: r.connection_name as string,
         connectionType: r.connection_type === 'mysql' || r.connection_type === 'postgres' || r.connection_type === 'sqlite'
           || r.connection_type === 'sqlserver' || r.connection_type === 'mongodb' || r.connection_type === 'redis'
+          || r.connection_type === 'qdrant'
           ? r.connection_type
           : null,
         databaseName: r.database_name as string | null,

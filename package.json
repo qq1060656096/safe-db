@@ -16,6 +16,9 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "test:classify": "node scripts/test-classify.mjs",
     "test:native": "node scripts/test-native-classify.mjs",
+    "test:qdrant": "node scripts/test-qdrant-driver.mjs",
+    "test:operations": "ELECTRON_RUN_AS_NODE=1 electron scripts/test-structured-operations.mjs",
+    "test:drivers": "node scripts/test-all-driver-operations.mjs",
     "test:agent": "node scripts/test-agent-service.mjs",
     "test:cli": "node scripts/test-cli-output.mjs",
     "cli": "node scripts/safedb.mjs"
@@ -23,6 +26,7 @@
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/lang-sql": "^6.8.0",
+    "@qdrant/js-client-rest": "1.18.0",
     "@vicons/antd": "^0.13.0",
     "better-sqlite3": "^12.2.0",
     "codemirror": "^6.0.1",

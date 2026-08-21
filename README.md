@@ -72,7 +72,7 @@ CLI 默认输出稳定的单行 JSON，Codex、Claude Code 以及其他支持 Sh
 | --- | --- |
 | AI Agent CLI | 连接发现、数据库与对象浏览、单/多表结构、DDL、SQL 检查与执行、审批等待 |
 | 机器可读协议 | 稳定 JSON 输出、本地 Socket 通信、明确的状态与错误码 |
-| 数据库连接 | MySQL、PostgreSQL、SQLite、SQL Server、MongoDB、Redis，支持连接测试 |
+| 数据库连接 | MySQL、PostgreSQL、SQLite、SQL Server、MongoDB、Redis、Qdrant，支持连接测试 |
 | SSH 隧道 | 所有 TCP 数据库连接均可使用跳板机，支持密码与私钥认证 |
 | 对象浏览 | 浏览数据库、Schema、表、视图、函数和存储过程 |
 | SQL 编辑 | 方言感知补全、快捷执行、多标签页与查询保存 |
@@ -106,6 +106,7 @@ safe db 基于 Electron 和 Node.js，桌面端与 Agent CLI 支持主流桌面�
 | SQL Server | ✅ | ✅ SQL | ✅ | ✅ |
 | MongoDB | ✅ Collection / 样本 Schema | ✅ JSON 原生命令 | ✅ | ✅ |
 | Redis | ✅ Key / 数据类型 | ✅ Redis CLI 命令 | ✅ | ✅ |
+| Qdrant | ✅ Collection / Point / Payload Index | ✅ 受限 REST JSON | ✅ | ✅ |
 
 ### 三档连接权限
 
@@ -119,7 +120,7 @@ safe db 基于 Electron 和 Node.js，桌面端与 Agent CLI 支持主流桌面�
 
 ### 开发者和 Agent 共用的数据库工作台
 
-- MySQL、PostgreSQL、SQLite、SQL Server、MongoDB、Redis 连接与连接测试
+- MySQL、PostgreSQL、SQLite、SQL Server、MongoDB、Redis、Qdrant 连接与连接测试
 - 所有 TCP 数据库连接均支持 SSH 跳板机、密码与私钥认证
 - 数据库、Schema、表、视图、函数和存储过程浏览
 - CodeMirror SQL 编辑器、方言感知补全与 `Cmd/Ctrl + Enter` 快速执行
@@ -130,7 +131,7 @@ safe db 基于 Electron 和 Node.js，桌面端与 Agent CLI 支持主流桌面�
 - 查询结果或表数据导出为 CSV / JSON
 - 多语言界面、多标签页、多窗口和可调节面板
 
-### MongoDB 与 Redis 原生命令
+### MongoDB、Redis 与 Qdrant 原生命令
 
 MongoDB 查询编辑器接受单个 JSON 数据库命令，或由命令对象组成的 JSON 数组：
 
@@ -145,7 +146,21 @@ GET "user:1"
 HGETALL "profile:1"
 ```
 
-MongoDB Collection 与 Redis Key 可在左侧对象树中浏览并以只读表格查看。修改数据请使用原生命令，仍会经过只读 / 审批 / 完全访问权限管道。MongoDB 多命令事务需要服务端为副本集或分片集群；Redis 多条写命令使用 `MULTI/EXEC`。
+MongoDB Collection 与 Redis Key 可在左侧对象树中浏览，并直接在数据网格中新增、修改、删除和批量导入。MongoDB 还支持 Collection 创建、复制、清空、删除和索引管理；Redis 支持各数据类型的 Key 创建、复制与删除，其中 Stream 记录只开放新增和删除。Redis 无法保留一个没有任何数据的 Key，因此能力模型不会把“清空但保留 Key”伪装成可用功能。原生命令编辑器继续作为高级入口，并同样经过只读 / 审批 / 完全访问权限管道。
+
+Qdrant 查询编辑器接受受限 REST JSON，只允许访问当前连接内经过安全分类的 API 路径。例如执行向量查询：
+
+```json
+{
+  "method": "POST",
+  "path": "/collections/documents/points/query",
+  "body": { "query": [0.1, 0.2], "limit": 10, "with_payload": true }
+}
+```
+
+Qdrant Collection 直接显示在连接下；Point 使用游标分页浏览，向量默认不加载。数据页支持新增、编辑和批量删除 Point，Collection 菜单支持 JSON/CSV 导入、清空、删除、定义查看以及 Payload Index 管理。REST JSON 可使用受限的 `query` 对象传递 `wait`、`ordering`、`timeout` 和 `consistency`。
+
+全部七类数据库驱动都使用统一的能力模型和结构化操作协议：渲染进程只提交操作意图，标识符转义、参数绑定、MongoDB BSON、Redis 命令与 Qdrant REST 构造均在主进程驱动完成。MySQL、PostgreSQL、SQLite 与 SQL Server 支持参数化 CRUD、表创建/变更/复制/清空/删除和索引管理；MongoDB、Redis、Qdrant 则按各自领域对象公开真实能力。每次执行都会返回实际的 `transaction`、`single-request` 或 `best-effort` 原子性，不承诺不存在的跨请求回滚。
 
 ### 安全执行链路
 
@@ -159,9 +174,9 @@ flowchart LR
     Split --> Policy{"连接权限模式"}
     Policy -->|只读且有写入| Deny["阻止并记录"]
     Policy -->|审批且有写入| Confirm["一次性 Token 二次确认"]
-    Policy -->|允许执行| Tx["事务执行"]
+    Policy -->|允许执行| Tx["事务 / 受控执行"]
     Confirm -->|桌面端人工确认| Tx
-    Tx --> Driver["SQL / MongoDB / Redis Driver"]
+    Tx --> Driver["SQL / MongoDB / Redis / Qdrant Driver"]
     Tx --> Audit["本地操作日志"]
 ```
 
@@ -183,7 +198,7 @@ npm run dev
 
 在 macOS 开发模式下，`npm run dev` 会在 `node_modules/.cache/` 中自动准备名称为 `safe db` 的 Electron 运行时，使系统菜单栏也显示正确的产品名；该缓存不会进入版本控制。
 
-1. 点击左侧“新建”，选择 MySQL、PostgreSQL、SQLite、SQL Server、MongoDB 或 Redis。
+1. 点击左侧“新建”，选择 MySQL、PostgreSQL、SQLite、SQL Server、MongoDB、Redis 或 Qdrant。
 2. 填写连接信息，并选择权限模式；连接生产库时建议从“只读”开始。
 3. 测试并保存连接，双击连接浏览对象。
 4. 双击表查看数据，或右键连接创建 SQL 查询。
@@ -210,6 +225,9 @@ npm run typecheck
 # SQL 风险分类器测试
 npm run test:classify
 npm run test:native
+npm run test:qdrant
+npm run test:operations
+npm run test:drivers
 
 # AI Agent CLI 服务测试
 npm run test:agent
@@ -272,6 +290,8 @@ CLI 帮助支持 `zh-CN`、`zh-TW`、`en-US`、`ja-JP`、`ko-KR`、`de-DE`、`fr
 npm run typecheck
 npm run test:classify
 npm run test:native
+npm run test:qdrant
+npm run test:operations
 npm run test:agent
 npm run test:cli
 npm run build
@@ -284,7 +304,7 @@ npm run build
 | 桌面运行时 | Electron 33、electron-vite |
 | 前端 | Vue 3、TypeScript、Pinia、Vue Router |
 | UI / 编辑器 | Naive UI、CodeMirror 6 |
-| 数据库 | mysql2、pg、better-sqlite3、mssql、mongodb、redis |
+| 数据库 | mysql2、pg、better-sqlite3、mssql、mongodb、redis、@qdrant/js-client-rest |
 | 网络 | ssh2 |
 | 本地存储 | JSON、SQLite、Electron safeStorage |
 
@@ -296,7 +316,7 @@ safe-db/
 │   ├── main/
 │   │   ├── agent/        # Agent CLI 本地协议、服务与审批请求生命周期
 │   │   ├── core/         # SQL 拆分、风险分类、权限决策、统一执行器
-│   │   ├── drivers/      # SQL Server / MySQL / PostgreSQL / SQLite / MongoDB / Redis 驱动
+│   │   ├── drivers/      # SQL Server / MySQL / PostgreSQL / SQLite / MongoDB / Redis / Qdrant 驱动
 │   │   ├── ssh/          # SSH 隧道生命周期
 │   │   ├── store/        # 连接、保存查询与操作日志
 │   │   └── ipc.ts        # 主进程 IPC 入口

@@ -1,5 +1,6 @@
 import pg from 'pg'
 import type {
+  DatabaseOperation,
   ColumnInfo,
   CheckConstraintInfo,
   ForeignKeyInfo,
@@ -12,9 +13,12 @@ import {
   buildWhereClause,
   sanitizeRows,
   type DbDriver,
+  type DriverOperationResult,
   type TableDataQuery,
   type TableDataResult
 } from './base'
+import { capabilitiesForType } from './capabilities'
+import { compileRelationalOperation } from './relationalOperation'
 
 /** 双引号包裹标识符 */
 function quoteIdent(name: string): string {
@@ -22,6 +26,7 @@ function quoteIdent(name: string): string {
 }
 
 export class PostgresDriver implements DbDriver {
+  readonly capabilities = capabilitiesForType('postgres')
   /** database → 该库的连接(PG 连接绑定库,跨库查询需另起连接) */
   private clients = new Map<string, pg.Client>()
 
@@ -377,6 +382,34 @@ export class PostgresDriver implements DbDriver {
       }
       return { kind: 'exec', affectedRows: r.rowCount ?? 0 } as QueryResult
     })
+  }
+
+  async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const database = 'target' in operation
+      ? operation.target.database
+      : 'source' in operation ? operation.source.database
+        : operation.database
+    const client = await this.clientFor(database)
+    const commands = compileRelationalOperation(operation, 'postgres', this.cfg.database)
+    const transactional = !(operation.kind === 'object.create' && operation.objectType === 'database')
+    if (transactional) await client.query('BEGIN')
+    let affectedRows = 0
+    try {
+      for (const command of commands) {
+        const result = await client.query(command.sql, command.params)
+        affectedRows += result.rowCount ?? 0
+      }
+      if (transactional) await client.query('COMMIT')
+    } catch (error) {
+      if (transactional) await client.query('ROLLBACK').catch(() => {})
+      throw error
+    }
+    return {
+      results: [{ kind: 'exec', affectedRows }],
+      atomicity: transactional ? 'transaction' : 'single-request',
+      succeeded: operation.kind === 'records.mutate' ? operation.mutations.length : 1,
+      failed: 0
+    }
   }
 
   async run(sql: string, database?: string): Promise<QueryResult[]> {

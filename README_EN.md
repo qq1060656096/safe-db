@@ -66,7 +66,7 @@ Most database clients answer how a person can operate a database. safe db also a
 | --- | --- |
 | AI Agent CLI | Connection discovery, object browsing, single/multi-table schemas, DDL, SQL validation and execution, approval waiting |
 | Machine-readable protocol | Stable JSON output, local socket transport, explicit statuses and error codes |
-| Database connections | MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, and Redis connections with connection testing |
+| Database connections | MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Redis, and Qdrant connections with connection testing |
 | SSH tunnels | Jump hosts for every TCP database connection, with password and private-key authentication |
 | Object browser | Browse databases, schemas, tables, views, functions, and stored procedures |
 | SQL editor | Dialect-aware completion, keyboard execution, multiple tabs, and saved queries |
@@ -100,6 +100,7 @@ The repository currently provides source-based development and build workflows. 
 | SQL Server | ✅ | ✅ SQL | ✅ | ✅ |
 | MongoDB | ✅ Collections / sampled schemas | ✅ native JSON commands | ✅ | ✅ |
 | Redis | ✅ keys / data types | ✅ Redis CLI commands | ✅ | ✅ |
+| Qdrant | ✅ collections / points / payload indexes | ✅ restricted REST JSON | ✅ | ✅ |
 
 ### Three connection permission modes
 
@@ -113,7 +114,7 @@ Permission modes can also be locked to prevent casual changes while a connection
 
 ### A database workspace for developers
 
-- MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, and Redis connections with connection testing
+- MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Redis, and Qdrant connections with connection testing
 - SSH jump hosts for every TCP database connection, with password and private-key authentication
 - Browse databases, schemas, tables, views, functions, and stored procedures
 - CodeMirror SQL editor, dialect-aware completion, and `Cmd/Ctrl + Enter` execution
@@ -124,7 +125,7 @@ Permission modes can also be locked to prevent casual changes while a connection
 - Export query results or table data as CSV / JSON
 - Multiple interface languages, tabs, windows, and resizable panels
 
-### MongoDB and Redis native commands
+### MongoDB, Redis, and Qdrant native commands
 
 The MongoDB query editor accepts one JSON database command, or a JSON array of command objects:
 
@@ -139,7 +140,21 @@ GET "user:1"
 HGETALL "profile:1"
 ```
 
-MongoDB collections and Redis keys can be browsed from the object tree and viewed in a read-only grid. Use native commands to modify them; those commands still pass through the Read-only / Approval / Full access pipeline. Multi-command MongoDB transactions require a replica set or sharded cluster. Redis write batches use `MULTI/EXEC`.
+MongoDB collections and Redis keys can be browsed from the object tree and edited directly in the data grid, including insert, update, delete, and bulk import. MongoDB also supports collection create/copy/clear/drop and index management. Redis supports key create/copy/drop across its data types, while Stream entries expose insert and delete only. Redis cannot preserve a key with no data, so the capability model does not pretend that “clear while preserving the key” exists. Native command editors remain available as advanced entry points and still pass through the Read-only / Approval / Full access pipeline.
+
+The Qdrant query editor accepts restricted REST JSON and only allows safely classified API paths on the current connection. For example:
+
+```json
+{
+  "method": "POST",
+  "path": "/collections/documents/points/query",
+  "body": { "query": [0.1, 0.2], "limit": 10, "with_payload": true }
+}
+```
+
+Qdrant collections appear directly below the connection. Points use cursor pagination, and vectors are omitted by default. The data view supports inserting, editing, and bulk-deleting points; collection actions include JSON/CSV import, clear, delete, definition inspection, and payload-index management. REST JSON may use a restricted `query` object for `wait`, `ordering`, `timeout`, and `consistency`.
+
+All seven database drivers now use the shared capability model and structured-operation protocol. The renderer submits intent while identifier quoting, parameter binding, MongoDB BSON conversion, Redis command construction, and Qdrant REST construction stay in main-process drivers. MySQL, PostgreSQL, SQLite, and SQL Server provide parameterized CRUD plus table create/alter/copy/clear/drop and index management; MongoDB, Redis, and Qdrant advertise their real domain capabilities. Every operation reports its actual `transaction`, `single-request`, or `best-effort` atomicity without implying unavailable cross-request rollback.
 
 ### Safe execution pipeline
 
@@ -153,9 +168,9 @@ flowchart LR
     Split --> Policy{"Connection permission mode"}
     Policy -->|Read-only with writes| Deny["Block and record"]
     Policy -->|Approval with writes| Confirm["One-time token confirmation"]
-    Policy -->|Execution allowed| Tx["Transactional execution"]
+    Policy -->|Execution allowed| Tx["Transactional / guarded execution"]
     Confirm -->|Human confirmation in desktop app| Tx
-    Tx --> Driver["SQL / MongoDB / Redis driver"]
+    Tx --> Driver["SQL / MongoDB / Redis / Qdrant driver"]
     Tx --> Audit["Local operation log"]
 ```
 
@@ -177,7 +192,7 @@ npm run dev
 
 In macOS development mode, `npm run dev` automatically prepares an Electron runtime named `safe db` under `node_modules/.cache/`, so the product name is also displayed correctly in the system menu bar. This cache is not committed to version control.
 
-1. Click “New” in the sidebar and choose MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, or Redis.
+1. Click “New” in the sidebar and choose MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Redis, or Qdrant.
 2. Enter the connection details and choose a permission mode. Start with Read-only for production databases.
 3. Test and save the connection, then double-click it to browse database objects.
 4. Double-click a table to view its data, or right-click a connection to create a SQL query.
@@ -204,8 +219,11 @@ npm run typecheck
 # SQL risk-classifier tests
 npm run test:classify
 
-# MongoDB / Redis native-command classifier tests
+# MongoDB / Redis / Qdrant native-command classifier tests
 npm run test:native
+npm run test:qdrant
+npm run test:operations
+npm run test:drivers
 
 # AI Agent CLI service tests
 npm run test:agent
@@ -264,6 +282,8 @@ Before submitting code, run at least:
 npm run typecheck
 npm run test:classify
 npm run test:native
+npm run test:qdrant
+npm run test:operations
 npm run test:agent
 npm run test:cli
 npm run build
@@ -276,7 +296,7 @@ npm run build
 | Desktop runtime | Electron 33, electron-vite |
 | Frontend | Vue 3, TypeScript, Pinia, Vue Router |
 | UI / editor | Naive UI, CodeMirror 6 |
-| Databases | mysql2, pg, better-sqlite3, mssql, mongodb, redis |
+| Databases | mysql2, pg, better-sqlite3, mssql, mongodb, redis, @qdrant/js-client-rest |
 | Networking | ssh2 |
 | Local storage | JSON, SQLite, Electron safeStorage |
 
@@ -288,7 +308,7 @@ safe-db/
 │   ├── main/
 │   │   ├── agent/        # Agent CLI protocol, local service, and approval-request lifecycle
 │   │   ├── core/         # SQL splitting, risk classification, permission decisions, unified executor
-│   │   ├── drivers/      # SQL Server / MySQL / PostgreSQL / SQLite / MongoDB / Redis drivers
+│   │   ├── drivers/      # SQL Server / MySQL / PostgreSQL / SQLite / MongoDB / Redis / Qdrant drivers
 │   │   ├── ssh/          # SSH tunnel lifecycle
 │   │   ├── store/        # Connections, saved queries, and operation logs
 │   │   └── ipc.ts        # Main-process IPC entry point

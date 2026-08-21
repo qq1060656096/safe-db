@@ -1,5 +1,6 @@
 import sql, { type IResult } from 'mssql'
 import type {
+  DatabaseOperation,
   ColumnInfo,
   CheckConstraintInfo,
   ForeignKeyInfo,
@@ -12,9 +13,18 @@ import {
   buildWhereClause,
   sanitizeRows,
   type DbDriver,
+  type DriverOperationResult,
   type TableDataQuery,
   type TableDataResult
 } from './base'
+import { capabilitiesForType } from './capabilities'
+import {
+  compileDefaultExpression,
+  compileRelationalOperation,
+  quoteRelationalIdentifier,
+  relationalTable,
+  type ParameterizedCommand
+} from './relationalOperation'
 
 function quoteIdent(name: string): string {
   return `[${name.replace(/]/g, ']]')}]`
@@ -23,6 +33,7 @@ function quoteIdent(name: string): string {
 type QueryOutput = IResult<unknown>
 
 export class SqlServerDriver implements DbDriver {
+  readonly capabilities = capabilitiesForType('sqlserver')
   private pools = new Map<string, sql.ConnectionPool>()
   private activeRequests = new Set<sql.Request>()
 
@@ -392,6 +403,77 @@ export class SqlServerDriver implements DbDriver {
       return await request.query(command)
     } finally {
       this.activeRequests.delete(request)
+    }
+  }
+
+  private bindOperationRequest(request: sql.Request, command: ParameterizedCommand): void {
+    command.params.forEach((value, index) => request.input(`p${index}`, value as never))
+  }
+
+  async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const database = 'target' in operation
+      ? operation.target.database
+      : 'source' in operation ? operation.source.database
+        : operation.database
+    let commands = compileRelationalOperation(operation, 'sqlserver', this.cfg.database)
+    if (operation.kind === 'object.create' && operation.objectType === 'database') {
+      const request = (await this.poolFor()).request()
+      const output = await this.runRequest(request, commands[0].sql)
+      const affectedRows = (output.rowsAffected ?? []).reduce((sum, count) => sum + count, 0)
+      return {
+        results: [{ kind: 'exec', affectedRows }], atomicity: 'single-request', succeeded: 1, failed: 0
+      }
+    }
+    const pool = await this.poolFor(database)
+    if (operation.kind === 'object.alter') {
+      const drops: ParameterizedCommand[] = []
+      const additions: ParameterizedCommand[] = []
+      const schema = operation.target.schema ?? 'dbo'
+      const table = relationalTable('sqlserver', operation.target, this.cfg.database)
+      for (const change of operation.changes) {
+        if (change.kind === 'add') continue
+        const columnName = change.kind === 'drop' ? change.name : change.previousName
+        const request = pool.request()
+        request.input('schema', sql.NVarChar, schema)
+        request.input('table', sql.NVarChar, operation.target.name)
+        request.input('column', sql.NVarChar, columnName)
+        const current = await request.query(
+          `SELECT dc.name FROM sys.default_constraints dc
+           JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+           JOIN sys.tables t ON t.object_id = c.object_id
+           JOIN sys.schemas s ON s.schema_id = t.schema_id
+           WHERE s.name = @schema AND t.name = @table AND c.name = @column`
+        )
+        const constraint = current.recordset[0]?.name
+        if (constraint) drops.push({ sql: `ALTER TABLE ${table} DROP CONSTRAINT ${quoteRelationalIdentifier('sqlserver', String(constraint))}`, params: [] })
+        if (change.kind === 'alter') {
+          const value = compileDefaultExpression(change.column.defaultValue)
+          if (value !== null) additions.push({
+            sql: `ALTER TABLE ${table} ADD DEFAULT ${value} FOR ${quoteRelationalIdentifier('sqlserver', change.column.name)}`,
+            params: []
+          })
+        }
+      }
+      commands = [...drops, ...commands, ...additions]
+    }
+    const transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    let affectedRows = 0
+    try {
+      for (const command of commands) {
+        const request = new sql.Request(transaction)
+        this.bindOperationRequest(request, command)
+        const output = await this.runRequest(request, command.sql)
+        affectedRows += (output.rowsAffected ?? []).reduce((sum, count) => sum + count, 0)
+      }
+      await transaction.commit()
+    } catch (error) {
+      await transaction.rollback().catch(() => {})
+      throw error
+    }
+    return {
+      results: [{ kind: 'exec', affectedRows }], atomicity: 'transaction',
+      succeeded: operation.kind === 'records.mutate' ? operation.mutations.length : 1, failed: 0
     }
   }
 

@@ -42,6 +42,7 @@ const stopping = ref(false)
 const stopStatus = ref<'stopping' | 'stopped' | null>(null)
 const queryPage = ref<HTMLElement | null>(null)
 const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
+const isQdrant = computed(() => connection.value?.type === 'qdrant')
 const completion = ref<SqlCompletionCatalog>({ tables: [] })
 const databaseOptions = ref<SelectOption[]>([])
 const databasesLoading = ref(false)
@@ -81,8 +82,9 @@ const saveConnectionOptions = computed<SelectOption[]>(() => store.connections.m
 const saveConnection = computed(() => store.connections.find((item) => item.id === savedConnectionId.value))
 const editorPlaceholder = computed(() => connection.value?.type === 'mongodb'
   ? t('query.mongodbPlaceholder')
-  : connection.value?.type === 'redis' ? t('query.redisPlaceholder') : t('query.placeholder'))
-const canFormat = computed(() => Boolean(value.value.trim()) && connection.value?.type !== 'mongodb' && connection.value?.type !== 'redis')
+  : connection.value?.type === 'redis' ? t('query.redisPlaceholder')
+    : connection.value?.type === 'qdrant' ? t('query.qdrantPlaceholder') : t('query.placeholder'))
+const canFormat = computed(() => Boolean(value.value.trim()) && !['mongodb', 'redis', 'qdrant'].includes(connection.value?.type ?? ''))
 let saveDatabaseRequestId = 0
 let databaseOptionsRequestId = 0
 const EDITOR_HEIGHT_KEY = 'safe-db.query.editor-height'
@@ -177,6 +179,11 @@ async function refreshDatabaseOptions(clear = false): Promise<void> {
   const current = connection.value
   if (clear) databaseOptions.value = []
   if (!current) { databasesLoading.value = false; return }
+  if (current.type === 'qdrant') {
+    store.setTabDatabase(props.tab.id, undefined)
+    databasesLoading.value = false
+    return
+  }
   databasesLoading.value = true
   try {
     const databases = await loadDatabaseMetadata(current.id)
@@ -232,7 +239,7 @@ watch(
       loadColumns: current ? (table) => completionColumns(current, table) : undefined
     }
     // 连接级查询只加载数据库名；选定数据库后才加载该库的表，避免遍历全部库。
-    if (!current || current.type === 'mongodb' || !database) return
+    if (!current || current.type === 'mongodb' || current.type === 'qdrant' || !database) return
     try {
       // 数据库下拉框复用同一请求并先完成；提示元数据不会抢在它前面占用连接。
       await loadDatabaseMetadata(current.id).catch(() => [])
@@ -374,6 +381,11 @@ async function loadSaveDatabases(connectionId: string, keepSelection = false): P
   const requestId = ++saveDatabaseRequestId
   saveDatabaseOptions.value = []
   if (!connectionId) return
+  if (store.connections.find((item) => item.id === connectionId)?.type === 'qdrant') {
+    savedDatabase.value = null
+    saveDatabasesLoading.value = false
+    return
+  }
   saveDatabasesLoading.value = true
   try {
     const databases = await loadDatabaseMetadata(connectionId)
@@ -541,8 +553,9 @@ defineExpose({ saveForClose })
         {{ t('query.format') }}
       </NButton>
       <span class="query-toolbar-divider" />
-      <span class="query-database-label">{{ t('query.database') }}</span>
+      <span v-if="!isQdrant" class="query-database-label">{{ t('query.database') }}</span>
       <NSelect
+        v-if="!isQdrant"
         class="query-database-select"
         size="small"
         filterable
@@ -630,7 +643,7 @@ defineExpose({ saveForClose })
       </NFormItem>
       <NFormItem :label="t('query.saveLocation')" required>
         <div class="query-save-location">
-          <div class="query-save-selector">
+          <div v-if="saveConnection?.type !== 'qdrant'" class="query-save-selector">
             <span class="query-save-selector-label">{{ t('query.selectConnection') }}</span>
             <NSelect filterable :value="savedConnectionId || null" :options="saveConnectionOptions" :placeholder="t('query.selectConnection')" @update:value="(id) => selectSaveConnection(String(id))" />
           </div>

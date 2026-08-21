@@ -1,11 +1,11 @@
 import type { ConnectionMeta } from '../../shared/types'
 import type { AppTab } from './stores/app'
 
-export type ObjectDefinitionKind = 'view' | 'function' | 'procedure'
+export type ObjectDefinitionKind = 'view' | 'function' | 'procedure' | 'collection' | 'key'
 
 export interface ObjectDefinitionTarget {
   connectionId: string
-  database: string
+  database?: string
   schema?: string
   name: string
   kind: ObjectDefinitionKind
@@ -25,7 +25,10 @@ function quoteIdentifier(type: ConnectionMeta['type'], name: string): string {
 }
 
 function qualifiedObject(connection: ConnectionMeta, target: ObjectDefinitionTarget): string {
-  if (connection.type === 'mysql') return `${quoteIdentifier(connection.type, target.database)}.${quoteIdentifier(connection.type, target.name)}`
+  if (connection.type === 'mysql') {
+    if (!target.database) throw new Error('MySQL 对象定义缺少数据库名称')
+    return `${quoteIdentifier(connection.type, target.database)}.${quoteIdentifier(connection.type, target.name)}`
+  }
   if (connection.type === 'postgres') return `${quoteIdentifier(connection.type, target.schema ?? 'public')}.${quoteIdentifier(connection.type, target.name)}`
   if (connection.type === 'sqlserver') return `${quoteIdentifier(connection.type, target.schema ?? 'dbo')}.${quoteIdentifier(connection.type, target.name)}`
   return quoteIdentifier(connection.type, target.name)
@@ -33,6 +36,7 @@ function qualifiedObject(connection: ConnectionMeta, target: ObjectDefinitionTar
 
 function editableDefinitionSql(connection: ConnectionMeta, target: ObjectDefinitionTarget, code: string): string {
   const normalized = code.trim()
+  if (target.kind === 'collection' || target.kind === 'key') return normalized
   if (target.kind === 'view') {
     if (connection.type === 'mysql' || connection.type === 'postgres') {
       return /^CREATE\s+OR\s+REPLACE\b/i.test(normalized)
@@ -58,7 +62,7 @@ function editableDefinitionSql(connection: ConnectionMeta, target: ObjectDefinit
 }
 
 export async function loadObjectDefinition(target: ObjectDefinitionTarget): Promise<string> {
-  return target.kind === 'view'
+  return target.kind === 'view' || target.kind === 'collection' || target.kind === 'key'
     ? window.api.getObjectDdl(target.connectionId, target.database, target.name, target.schema)
     : window.api.getRoutineDefinition(target.connectionId, target.database, target.name, target.kind, target.schema, target.arguments)
 }
@@ -71,12 +75,14 @@ export function openObjectDefinitionTab(
   readOnly: boolean,
   title: string
 ): void {
+  const isObjectDefinition = target.kind === 'view' || target.kind === 'collection' || target.kind === 'key'
+  const routineKind = target.kind === 'function' || target.kind === 'procedure' ? target.kind : undefined
   const existing = store.tabs.find((tab: AppTab) => tab.type === 'query' && tab.definitionEditor
     && Boolean(tab.definitionReadOnly) === readOnly
     && tab.connectionId === target.connectionId && tab.database === target.database
     && tab.schema === target.schema && tab.definitionKind === target.kind
-    && tab.table === (target.kind === 'view' ? target.name : undefined)
-    && tab.routine === (target.kind === 'view' ? undefined : target.name)
+    && tab.table === (isObjectDefinition ? target.name : undefined)
+    && tab.routine === (isObjectDefinition ? undefined : target.name)
     && tab.routineArguments === target.arguments)
   if (existing) {
     store.setActiveTab(existing.id)
@@ -93,9 +99,9 @@ export function openObjectDefinitionTab(
     connectionId: target.connectionId,
     database: target.database,
     schema: target.schema,
-    table: target.kind === 'view' ? target.name : undefined,
-    routine: target.kind === 'view' ? undefined : target.name,
-    routineType: target.kind === 'view' ? undefined : target.kind,
+    table: isObjectDefinition ? target.name : undefined,
+    routine: isObjectDefinition ? undefined : target.name,
+    routineType: routineKind,
     routineArguments: target.arguments,
     definitionEditor: true,
     definitionReadOnly: readOnly,

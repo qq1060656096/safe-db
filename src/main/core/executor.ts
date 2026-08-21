@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import type { ExecuteResponse, SqlKind } from '../../shared/types'
+import type { DatabaseOperation, ExecuteResponse, SqlKind } from '../../shared/types'
 import type { DriverManager } from '../drivers/manager'
 import type { AuditStore } from '../store/audit'
 import type { ConnectionStore } from '../store/connections'
 import { classifyDatabaseInput } from './nativeCommand'
 import { decide } from './permission'
+import { assertDatabaseOperation, databaseOperationKind, databaseOperationPreview, operationSupports } from './databaseOperation'
 
 interface PendingApproval {
   connectionId: string
@@ -12,6 +13,7 @@ interface PendingApproval {
   database?: string
   sqlKind: SqlKind
   createdAt: number
+  operation?: DatabaseOperation
 }
 
 export interface ApprovalResolvedEvent {
@@ -22,8 +24,8 @@ export interface ApprovalResolvedEvent {
 const APPROVAL_TTL_MS = 5 * 60 * 1000
 
 /**
- * 统一执行管道:所有 SQL(编辑器 / 网格编辑 / 结构变更)都经过
- * 分类 → 权限判定 → (审批)→ 事务执行 → 审计。
+ * 统一执行管道：所有 SQL 和原生命令（编辑器 / 网格编辑 / 结构变更）都经过
+ * 分类 → 权限判定 →（审批）→ 事务或受控执行 → 审计。
  */
 export class Executor {
   private pending = new Map<string, PendingApproval>()
@@ -101,6 +103,48 @@ export class Executor {
     return this.doExecute(connectionId, sql, database, kind, 'not_required')
   }
 
+  /** 结构化操作与原生 SQL/REST 共用权限、审批、审计和元数据失效链路。 */
+  async executeOperation(connectionId: string, input: unknown): Promise<ExecuteResponse> {
+    const cfg = this.connections.get(connectionId)
+    if (!cfg) return { status: 'error', error: '连接不存在' }
+    let operation: DatabaseOperation
+    try {
+      assertDatabaseOperation(input)
+      operation = input
+      const capabilities = this.drivers.capabilities(connectionId)
+      const unsupported = operationSupports(capabilities, operation).find((item) => !item.supported)
+      if (unsupported && !unsupported.supported) throw new Error(unsupported.reason)
+    } catch (error) {
+      return { status: 'error', error: error instanceof Error ? error.message : String(error) }
+    }
+
+    const kind = databaseOperationKind(operation)
+    const preview = databaseOperationPreview(operation)
+    const database = 'target' in operation
+      ? operation.target.database
+      : 'source' in operation ? operation.source.database
+        : operation.database
+    const decision = decide(cfg.permissionMode, kind)
+    if (decision === 'deny') {
+      this.audit.insert({
+        connectionId, connectionName: cfg.name, connectionType: cfg.type,
+        databaseName: database ?? cfg.database, sqlText: preview, sqlKind: kind,
+        permissionMode: cfg.permissionMode, approvalStatus: 'not_required', status: 'blocked',
+        error: '当前连接为只读模式,已阻止写操作', durationMs: 0
+      })
+      return { status: 'denied', sqlKind: kind, error: '当前连接为只读模式,写操作已被阻止', preview }
+    }
+    if (decision === 'needsApproval') {
+      this.gcPending()
+      const token = randomUUID()
+      this.pending.set(token, {
+        connectionId, sql: preview, database, sqlKind: kind, createdAt: Date.now(), operation
+      })
+      return { status: 'needsApproval', sqlKind: kind, approvalToken: token, preview }
+    }
+    return this.doExecuteOperation(connectionId, operation, kind, 'not_required')
+  }
+
   async confirmExecute(token: string): Promise<ExecuteResponse> {
     const p = this.pending.get(token)
     this.pending.delete(token) // 一次性,无论成败都消费掉
@@ -109,7 +153,9 @@ export class Executor {
       this.emitApprovalResolved(token, response)
       return response
     }
-    const response = await this.doExecute(p.connectionId, p.sql, p.database, p.sqlKind, 'approved')
+    const response = p.operation
+      ? await this.doExecuteOperation(p.connectionId, p.operation, p.sqlKind, 'approved')
+      : await this.doExecute(p.connectionId, p.sql, p.database, p.sqlKind, 'approved')
     this.emitApprovalResolved(token, response)
     return response
   }
@@ -153,11 +199,19 @@ export class Executor {
       const driver = await this.drivers.get(connectionId)
       const { statements } = classifyDatabaseInput(cfg.type, sql)
       const isWrite = kind === 'WRITE' || kind === 'DDL'
+      // PostgreSQL 明确禁止在事务中执行 CREATE DATABASE；MySQL / SQL Server
+      // 的建库语句也属于连接级操作。侧边栏建库只会生成一条语句，因此在保留
+      // 原有分类、审批和审计流程的同时，单独绕开表结构变更使用的事务包装。
+      const createsDatabase = statements.length === 1
+        && (cfg.type === 'mysql' || cfg.type === 'postgres' || cfg.type === 'sqlserver')
+        && /^\s*CREATE\s+DATABASE\b/i.test(statements[0].sql)
       const results = isWrite
-        ? await driver.runInTransaction(
-            statements.map((s) => s.sql),
-            database
-          )
+        ? createsDatabase
+          ? await driver.run(statements[0].sql, database)
+          : await driver.runInTransaction(
+              statements.map((s) => s.sql),
+              database
+            )
         : await driver.run(sql, database)
       const durationMs = Date.now() - started
       const affectedRows = results.reduce((sum, r) => sum + (r.affectedRows ?? 0), 0)
@@ -174,8 +228,9 @@ export class Executor {
         affectedRows: isWrite ? affectedRows : null,
         durationMs
       })
-      // Redis 写命令会增删 key，MongoDB 写入可能隐式创建集合，也属于元数据变化。
-      if (kind === 'DDL' || (kind === 'WRITE' && (cfg.type === 'mongodb' || cfg.type === 'redis'))) {
+      // Redis 写命令会增删 key，MongoDB 可能隐式创建集合，Qdrant payload 字段也可能变化。
+      const capabilities = driver.capabilities
+      if (kind === 'DDL' || (kind === 'WRITE' && capabilities.recordModel !== 'row')) {
         this.emitMetadataChanged(connectionId)
       }
       return { status: 'ok', results, sqlKind: kind, durationMs }
@@ -196,6 +251,52 @@ export class Executor {
         durationMs
       })
       return { status: 'error', error: message, sqlKind: kind, durationMs }
+    }
+  }
+
+  private async doExecuteOperation(
+    connectionId: string,
+    operation: DatabaseOperation,
+    kind: SqlKind,
+    approvalStatus: 'not_required' | 'approved'
+  ): Promise<ExecuteResponse> {
+    const cfg = this.connections.get(connectionId)
+    if (!cfg) return { status: 'error', error: '连接不存在' }
+    const preview = databaseOperationPreview(operation)
+    const database = 'target' in operation
+      ? operation.target.database
+      : 'source' in operation ? operation.source.database
+        : operation.database
+    const started = Date.now()
+    try {
+      const driver = await this.drivers.get(connectionId)
+      const outcome = await driver.executeOperation(operation)
+      const durationMs = Date.now() - started
+      const affectedRows = outcome.results.reduce((sum, result) => sum + (result.affectedRows ?? 0), 0)
+      this.audit.insert({
+        connectionId, connectionName: cfg.name, connectionType: cfg.type,
+        databaseName: database ?? cfg.database, sqlText: preview, sqlKind: kind,
+        permissionMode: cfg.permissionMode, approvalStatus, status: 'success',
+        affectedRows, durationMs
+      })
+      if (kind === 'DDL' || (kind === 'WRITE' && driver.capabilities.recordModel !== 'row')) {
+        this.emitMetadataChanged(connectionId)
+      }
+      return {
+        status: 'ok', results: outcome.results, sqlKind: kind, durationMs,
+        atomicity: outcome.atomicity, succeeded: outcome.succeeded, failed: outcome.failed,
+        preview
+      }
+    } catch (error) {
+      const durationMs = Date.now() - started
+      const message = error instanceof Error ? error.message : String(error)
+      this.audit.insert({
+        connectionId, connectionName: cfg.name, connectionType: cfg.type,
+        databaseName: database ?? cfg.database, sqlText: preview, sqlKind: kind,
+        permissionMode: cfg.permissionMode, approvalStatus, status: 'error', error: message,
+        durationMs
+      })
+      return { status: 'error', error: message, sqlKind: kind, durationMs, preview }
     }
   }
 }

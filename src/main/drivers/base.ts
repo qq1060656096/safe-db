@@ -1,4 +1,7 @@
 import type {
+  DatabaseOperation,
+  DriverCapabilities,
+  ExecutionAtomicity,
   ColumnFilter,
   ColumnInfo,
   CheckConstraintInfo,
@@ -13,11 +16,20 @@ import type {
 
 export type { TableDataQuery, TableDataResult }
 
+export interface DriverOperationResult {
+  results: QueryResult[]
+  atomicity: ExecutionAtomicity
+  succeeded: number
+  failed: number
+}
+
 /**
  * 数据库驱动抽象。每个应用内连接对应一个驱动实例,
  * 持有一条到底层库的连接(桌面单用户场景,无需连接池)。
  */
 export interface DbDriver {
+  /** 每个驱动必须显式声明能力；缺失能力声明属于驱动契约错误。 */
+  readonly capabilities: DriverCapabilities
   connect(): Promise<void>
   disconnect(): Promise<void>
   /** 立即终止当前查询；允许通过断开底层会话实现，后续操作会自动重连。 */
@@ -35,8 +47,13 @@ export interface DbDriver {
   getTableData(q: TableDataQuery): Promise<TableDataResult>
   /** 执行任意 SQL,每条语句一个 QueryResult */
   run(sql: string, database?: string): Promise<QueryResult[]>
-  /** 写操作在事务中执行,任一失败整体回滚 */
+  /**
+   * 查询编辑器的原生命令批处理入口。驱动仅在底层真正支持时使用事务；
+   * 产品内置的数据与结构写入应优先走 executeOperation 并读取其实际 atomicity。
+   */
   runInTransaction(sqls: string[], database?: string): Promise<QueryResult[]>
+  /** 参数化结构化操作。所有内置驱动必须实现；不支持项由 capabilities 明确拒绝。 */
+  executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult>
 }
 
 /** 把驱动返回的行值转成可安全 IPC 序列化、且适合网格展示的值 */

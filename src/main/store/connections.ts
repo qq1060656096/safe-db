@@ -20,7 +20,7 @@ function portValue(value: unknown, fallback: number): number {
 
 function isDbType(value: unknown): value is DbType {
   return value === 'mysql' || value === 'postgres' || value === 'sqlite' || value === 'sqlserver'
-    || value === 'mongodb' || value === 'redis'
+    || value === 'mongodb' || value === 'redis' || value === 'qdrant'
 }
 
 const DEFAULT_PORTS: Record<Exclude<DbType, 'sqlite'>, number> = {
@@ -28,7 +28,8 @@ const DEFAULT_PORTS: Record<Exclude<DbType, 'sqlite'>, number> = {
   postgres: 5432,
   sqlserver: 1433,
   mongodb: 27017,
-  redis: 6379
+  redis: 6379,
+  qdrant: 6333
 }
 
 const DEFAULT_USERS: Record<Exclude<DbType, 'sqlite'>, string> = {
@@ -36,12 +37,13 @@ const DEFAULT_USERS: Record<Exclude<DbType, 'sqlite'>, string> = {
   postgres: 'postgres',
   sqlserver: 'sa',
   mongodb: '',
-  redis: ''
+  redis: '',
+  qdrant: ''
 }
 
 /**
  * 连接配置持久化:userData/connections.json
- * 密码用 Electron safeStorage(macOS Keychain / Windows DPAPI)加密后 base64 存储。
+ * 密码和 API Key 用 Electron safeStorage(macOS Keychain / Windows DPAPI)加密后 base64 存储。
  */
 export class ConnectionStore {
   private file: string
@@ -75,7 +77,7 @@ export class ConnectionStore {
     if (safeStorage.isEncryptionAvailable()) {
       return 'enc:' + safeStorage.encryptString(plain).toString('base64')
     }
-    throw new Error('系统安全存储不可用，无法安全保存密码')
+    throw new Error('系统安全存储不可用，无法安全保存凭据')
   }
 
   private decrypt(stored: string): string {
@@ -98,9 +100,9 @@ export class ConnectionStore {
     return stored ?? ''
   }
 
-  /** 脱敏后的列表项:去掉 DB 密码与 SSH 的密码/私钥口令 */
+  /** 脱敏后的列表项:去掉 DB 密码、API Key 与 SSH 的密码/私钥口令 */
   private toMeta(c: ConnectionConfig): ConnectionMeta {
-    const { password: _pw, ssh, ...rest } = c
+    const { password: _pw, apiKey: _apiKey, ssh, ...rest } = c
     const meta: ConnectionMeta = { ...rest }
     if (ssh) {
       const { password: _sp, passphrase: _spp, ...sshMeta } = ssh
@@ -190,6 +192,7 @@ export class ConnectionStore {
       connection.filePath ?? '',
       connection.authDatabase ?? '',
       connection.tls === true,
+      connection.timeoutMs ?? '',
       connection.encrypt === true,
       connection.trustServerCertificate !== false
     ])
@@ -227,9 +230,13 @@ export class ConnectionStore {
       port: portValue(value.port, defaultPort),
       user: textValue(value.user) ?? DEFAULT_USERS[type],
       password: includeEncryptedSecrets ? this.importedEncryptedSecret(value.password) : '',
+      apiKey: type === 'qdrant' && includeEncryptedSecrets ? this.importedEncryptedSecret(value.apiKey) : undefined,
       database: textValue(value.database),
       authDatabase: type === 'mongodb' ? textValue(value.authDatabase) : undefined,
-      tls: (type === 'mongodb' || type === 'redis') ? value.tls === true : undefined,
+      tls: (type === 'mongodb' || type === 'redis' || type === 'qdrant') ? value.tls === true : undefined,
+      timeoutMs: type === 'qdrant' && typeof value.timeoutMs === 'number' && Number.isFinite(value.timeoutMs)
+        ? Math.min(300_000, Math.max(1_000, Math.round(value.timeoutMs)))
+        : undefined,
       encrypt: type === 'sqlserver' ? value.encrypt === true : undefined,
       trustServerCertificate: type === 'sqlserver' ? value.trustServerCertificate !== false : undefined,
       ssh
@@ -260,6 +267,7 @@ export class ConnectionStore {
     return {
       ...c,
       password: this.decrypt(c.password ?? ''),
+      apiKey: this.decrypt(c.apiKey ?? ''),
       ssh: c.ssh
         ? {
             ...c.ssh,
@@ -286,6 +294,7 @@ export class ConnectionStore {
       permissionMode,
       permissionModeLocked,
       password: this.resolveSecret(cfg.password, existing?.password),
+      apiKey: cfg.type === 'qdrant' ? this.resolveSecret(cfg.apiKey, existing?.apiKey) : undefined,
       ssh: cfg.ssh
         ? {
             ...cfg.ssh,
@@ -330,6 +339,7 @@ export class ConnectionStore {
     return {
       ...cfg,
       password: cfg.password || this.decrypt(existing.password ?? ''),
+      apiKey: cfg.apiKey || this.decrypt(existing.apiKey ?? ''),
       ssh: cfg.ssh
         ? {
             ...cfg.ssh,

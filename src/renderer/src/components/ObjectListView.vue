@@ -3,7 +3,8 @@ import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, EditOutlined, EyeOutlined, FolderOpenOutlined, FunctionOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UnorderedListOutlined } from '@vicons/antd'
 import { NAlert, NButton, NCard, NCheckbox, NCode, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import type { DatabaseOperation, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import { useContextMenuDismiss } from '../contextMenu'
 import { connectionMetadataRevision } from '../metadataCache'
 import { loadObjectDefinition, openObjectDefinitionTab, type ObjectDefinitionTarget } from '../objectDefinition'
 import type { AppTab, ObjectSelection } from '../stores/app'
@@ -52,6 +53,7 @@ const tableContextShow = ref(false)
 const tableContextX = ref(0)
 const tableContextY = ref(0)
 const tableContextRow = ref<ObjectRow | null>(null)
+useContextMenuDismiss(() => { tableContextShow.value = false })
 let definitionRequest = 0
 let shortcutScopeActive = false
 
@@ -64,16 +66,23 @@ const queryRows = computed<ObjectRow[]>(() => store.savedQueries
 const rows = computed(() => props.tab.objectGroup === 'queries' ? queryRows.value : loadedRows.value)
 const selectedRow = computed(() => rows.value.find((row) => row.key === selectedKey.value))
 const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
-const supportsStructure = computed(() => connection.value?.type !== 'mongodb' && connection.value?.type !== 'redis')
+const capabilities = computed(() => props.tab.connectionId ? store.driverCapabilities[props.tab.connectionId] : undefined)
+const isPointModel = computed(() => capabilities.value?.recordModel === 'point')
+const hasNativeIndexDesigner = computed(() => ['point', 'document'].includes(capabilities.value?.recordModel ?? '')
+  && capabilities.value?.indexes.list.supported === true)
+const writableConnection = computed(() => connection.value?.permissionMode !== 'readonly')
+const supportsStructure = computed(() => capabilities.value?.objectKinds.includes('table') === true
+  && capabilities.value.definition.update.supported)
 const canEditDefinition = computed(() => supportsStructure.value && connection.value?.permissionMode !== 'readonly')
 const canEditSelectedObject = computed(() => {
   const row = selectedRow.value
   if (row?.table?.type === 'table') return supportsStructure.value
+    || hasNativeIndexDesigner.value
   return Boolean((row?.table?.type === 'view' || row?.routine) && canEditDefinition.value)
 })
 const selectedEditLabel = computed(() => {
   const row = selectedRow.value
-  if (row?.table?.type === 'table') return t('sidebar.designTable')
+  if (row?.table?.type === 'table') return t(isPointModel.value ? 'qdrant.manageIndexes' : 'sidebar.designTable')
   if (row?.table?.type === 'view') return t('objectList.editViewDefinition')
   if (row?.routine?.type === 'procedure') return t('objectList.editProcedureDefinition')
   if (row?.routine) return t('objectList.editFunctionDefinition')
@@ -99,17 +108,32 @@ const tableContextOptions = computed<DropdownOption[]>(() => {
   if (!row.table) return []
   return [
     { key: 'open', label: t('sidebar.openTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) },
+    ...(row.table.type === 'table' && hasNativeIndexDesigner.value ? [
+      { key: 'design', label: t('qdrant.manageIndexes'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) }
+    ] : []),
+    ...(row.table.type === 'table' && capabilities.value?.recordModel !== 'row' && capabilities.value?.definition.read.supported ? [
+      { key: 'definition', label: t('objectList.viewDefinition'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) }
+    ] : []),
     ...(row.table.type === 'view' ? [
       { key: 'definition', label: t('objectList.viewViewDefinition'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
       { key: 'edit-definition', label: t('objectList.editViewDefinition'), disabled: !canEditDefinition.value, icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) }
     ] : []),
     ...(row.table.type === 'table' && supportsStructure.value ? [
       { key: 'design', label: t('sidebar.designTable'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
-      { key: 'copy', label: t('sidebar.copyTable'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
+      ...(capabilities.value?.objects.copy.supported ? [{ key: 'copy', label: t('sidebar.copyTable'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }] : []),
       { type: 'divider' as const, key: 'table-action-divider' },
       { key: 'clear-table', label: t('sidebar.truncateTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(ClearOutlined) }) },
       { key: 'clear-data', label: t('objectList.clearData'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(ClearOutlined) }) },
       { key: 'drop', label: t('sidebar.dropTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
+    ] : []),
+    ...(row.table.type === 'table' && !supportsStructure.value && capabilities.value?.objects.copy.supported ? [
+      { key: 'copy', label: t('sidebar.copyTable'), disabled: !writableConnection.value, icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) }
+    ] : []),
+    ...(row.table.type === 'table' && !supportsStructure.value && capabilities.value?.records.clear.supported ? [
+      { key: 'clear-data', label: t(isPointModel.value ? 'sidebar.clearCollection' : 'objectList.clearData'), disabled: !writableConnection.value, icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(ClearOutlined) }) }
+    ] : []),
+    ...(row.table.type === 'table' && !supportsStructure.value && capabilities.value?.objects.drop.supported ? [
+      { key: 'drop', label: t(isPointModel.value ? 'sidebar.dropCollection' : 'sidebar.dropTable'), disabled: !writableConnection.value, icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
     ] : [])
   ]
 })
@@ -127,17 +151,6 @@ function formatDate(value?: string): string {
 }
 function formatRows(value?: number): string {
   return value === undefined || !Number.isFinite(value) ? '-' : Math.max(0, value).toLocaleString()
-}
-function quoteIdentifier(type: NonNullable<typeof connection.value>['type'], name: string): string {
-  if (type === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
-  if (type === 'sqlserver') return '[' + name.replace(/]/g, ']]') + ']'
-  return '"' + name.replace(/"/g, '""') + '"'
-}
-function qualifiedTable(type: NonNullable<typeof connection.value>['type'], database: string, schema: string | undefined, table: string): string {
-  if (type === 'postgres') return `${quoteIdentifier(type, schema ?? 'public')}.${quoteIdentifier(type, table)}`
-  if (type === 'sqlserver') return `${quoteIdentifier(type, schema ?? 'dbo')}.${quoteIdentifier(type, table)}`
-  if (type === 'mysql') return `${quoteIdentifier(type, database)}.${quoteIdentifier(type, table)}`
-  return quoteIdentifier(type, table)
 }
 function iconOf(row: ObjectRow): typeof TableOutlined {
   if (row.type === 'view') return EyeOutlined
@@ -159,7 +172,8 @@ const columns = computed<DataTableColumns<ObjectRow>>(() => [
 ])
 
 async function load(): Promise<void> {
-  if (!props.tab.connectionId || !props.tab.database || props.tab.objectGroup === 'queries') return
+  if (!props.tab.connectionId || props.tab.objectGroup === 'queries') return
+  if (!props.tab.database && capabilities.value?.recordModel !== 'point') return
   loading.value = true
   try {
     if (props.tab.objectGroup === 'routines') {
@@ -268,11 +282,12 @@ function updateSelectedKeys(keys: Array<string | number>): void {
 }
 function selectedCopyRows(): ObjectRow[] {
   const keys = new Set(selectedKeys.value.length ? selectedKeys.value : selectedKey.value ? [selectedKey.value] : [])
-  return rows.value.filter((row) => keys.has(row.key) && row.table?.type === 'table' && supportsStructure.value)
+  return rows.value.filter((row) => keys.has(row.key) && row.table?.type === 'table' && capabilities.value?.objects.copy.supported)
 }
 function selectedDropRows(): ObjectRow[] {
   const keys = new Set(selectedKeys.value.length ? selectedKeys.value : selectedKey.value ? [selectedKey.value] : [])
-  return rows.value.filter((row) => keys.has(row.key) && row.table?.type === 'table' && supportsStructure.value)
+  const canDrop = writableConnection.value && capabilities.value?.structuredOperations && capabilities.value.objects.drop.supported
+  return rows.value.filter((row) => keys.has(row.key) && row.table?.type === 'table' && canDrop)
 }
 function updateShortcutScope(event: Event): void {
   const target = event.target
@@ -320,13 +335,25 @@ function openTableContext(event: MouseEvent, row: ObjectRow): void {
   tableContextShow.value = true
 }
 function definitionTitleOf(row: ObjectRow): string {
+  if (capabilities.value?.recordModel !== 'row' && row.table) {
+    return t(capabilities.value?.recordTargetKind === 'key'
+      ? 'objectList.keyDefinitionTitle'
+      : 'objectList.collectionDefinitionTitle', { name: row.table.name })
+  }
   if (row.table?.type === 'view') return t('objectList.viewDefinitionTitle', { name: row.table.name })
   if (row.routine?.type === 'procedure') return t('objectList.procedureDefinitionTitle', { name: row.routine.name })
   return t('objectList.functionDefinitionTitle', { name: row.routine?.name ?? row.name })
 }
 function definitionTargetOf(row: ObjectRow): ObjectDefinitionTarget | null {
   const database = props.tab.database
-  if (!props.tab.connectionId || !database) return null
+  if (!props.tab.connectionId) return null
+  if (capabilities.value?.recordModel !== 'row' && row.table?.type === 'table') {
+    return {
+      connectionId: props.tab.connectionId, database, schema: row.table.schema, name: row.table.name,
+      kind: capabilities.value?.recordTargetKind === 'key' ? 'key' : 'collection'
+    }
+  }
+  if (!database) return null
   if (row.table?.type === 'view') {
     return { connectionId: props.tab.connectionId, database, schema: row.table.schema, name: row.table.name, kind: 'view' }
   }
@@ -364,14 +391,19 @@ async function openDefinition(row: ObjectRow, readOnly: boolean): Promise<void> 
 function clearRow(row: ObjectRow, action: 'table' | 'data'): void {
   const table = row.table
   const currentConnection = connection.value
-  if (truncating.value || !currentConnection || !props.tab.database || !table || table.type !== 'table' || !supportsStructure.value) return
+  if (truncating.value || !currentConnection || currentConnection.permissionMode === 'readonly' || !table || table.type !== 'table') return
+  if (!capabilities.value?.structuredOperations || !capabilities.value.records.clear.supported) return
   const tableName = table.name
-  const qualifiedName = qualifiedTable(currentConnection.type, props.tab.database, table.schema, tableName)
-  const sql = action === 'table' && currentConnection.type !== 'sqlite'
-    ? `TRUNCATE TABLE ${qualifiedName};`
-    : `DELETE FROM ${qualifiedName};`
+  const operation: DatabaseOperation = {
+    kind: 'records.clear',
+    target: {
+      kind: capabilities.value.recordTargetKind,
+      name: tableName, database: props.tab.database, schema: table.schema
+    }
+  }
+  const preview = JSON.stringify(operation, null, 2)
   const title = action === 'table' ? t('sidebar.truncateTitle', { name: tableName }) : t('objectList.clearDataTitle', { name: tableName })
-  const hint = action === 'table' ? t('sidebar.truncateHint', { sql }) : t('objectList.clearDataHint', { sql })
+  const hint = action === 'table' ? t('sidebar.truncateHint', { sql: preview }) : t('objectList.clearDataHint', { sql: preview })
   const confirmText = action === 'table' ? t('sidebar.truncateOk') : t('objectList.clearDataOk')
   const successText = action === 'table' ? t('sidebar.truncated', { name: tableName }) : t('objectList.clearedData', { name: tableName })
   dialog.warning({
@@ -382,7 +414,7 @@ function clearRow(row: ObjectRow, action: 'table' | 'data'): void {
     onPositiveClick: async () => {
       truncating.value = true
       try {
-        const result = await store.executeWithApproval(currentConnection.id, sql, props.tab.database)
+        const result = await store.executeOperationWithApproval(currentConnection.id, operation)
         if (result.status === 'ok') {
           message.success(successText)
           await load()
@@ -397,14 +429,14 @@ function clearRow(row: ObjectRow, action: 'table' | 'data'): void {
 function truncateRow(row: ObjectRow): void { clearRow(row, 'table') }
 function clearDataRow(row: ObjectRow): void { clearRow(row, 'data') }
 function openCopyTable(row: ObjectRow): void {
-  if (!row.table || row.table.type !== 'table' || !supportsStructure.value) return
+  if (!row.table || row.table.type !== 'table' || !capabilities.value?.objects.copy.supported) return
   copySource.value = row
   copyTargetName.value = `${row.table.name}_copy`
   copyWithData.value = true
   copyModalOpen.value = true
 }
 function openCopyTables(rowsToCopy: ObjectRow[]): void {
-  const validRows = rowsToCopy.filter((row) => row.table?.type === 'table' && supportsStructure.value)
+  const validRows = rowsToCopy.filter((row) => row.table?.type === 'table' && capabilities.value?.objects.copy.supported)
   if (validRows.length === 1) {
     openCopyTable(validRows[0])
     return
@@ -424,25 +456,17 @@ function closeBatchCopyTable(): void {
   batchCopyModalOpen.value = false
   batchCopyRows.value = []
 }
-async function buildCopySql(row: ObjectRow, targetName: string, withData: boolean): Promise<string> {
-  const source = row.table
-  const currentConnection = connection.value
-  if (!source || source.type !== 'table' || !currentConnection || !props.tab.database) throw new Error(t('sidebar.copyTableFailed', { error: 'Invalid table target' }))
-  const sourceSql = qualifiedTable(currentConnection.type, props.tab.database, source.schema, source.name)
-  const targetSql = qualifiedTable(currentConnection.type, props.tab.database, source.schema, targetName)
-  let createSql: string
-  if (currentConnection.type === 'mysql') createSql = `CREATE TABLE ${targetSql} LIKE ${sourceSql};`
-  else if (currentConnection.type === 'postgres') createSql = `CREATE TABLE ${targetSql} (LIKE ${sourceSql} INCLUDING ALL);`
-  else if (currentConnection.type === 'sqlserver') {
-    createSql = `SELECT ${withData ? '*' : 'TOP (0) *'} INTO ${targetSql} FROM ${sourceSql};`
-  } else {
-    const ddl = await window.api.getObjectDdl(currentConnection.id, props.tab.database, source.name, source.schema)
-    const prefix = /^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)/i
-    if (!prefix.test(ddl)) throw new Error(t('sidebar.copyTableDdlUnsupported'))
-    createSql = ddl.replace(prefix, `$1${targetSql}`)
+function copyOperation(row: ObjectRow, targetName: string, withData: boolean): DatabaseOperation {
+  if (!row.table || !capabilities.value) throw new Error('Invalid copy target')
+  return {
+    kind: 'object.copy',
+    source: {
+      kind: capabilities.value.recordTargetKind, name: row.table.name,
+      database: props.tab.database, schema: row.table.schema
+    },
+    targetName,
+    withData
   }
-  const insertPrefix = currentConnection.type === 'postgres' ? `INSERT INTO ${targetSql} OVERRIDING SYSTEM VALUE` : `INSERT INTO ${targetSql}`
-  return `${createSql.replace(/;?\s*$/, ';')}${withData && currentConnection.type !== 'sqlserver' ? `\n${insertPrefix} SELECT * FROM ${sourceSql};` : ''}`
 }
 async function confirmCopyTable(): Promise<void> {
   const source = copySource.value?.table
@@ -454,9 +478,8 @@ async function confirmCopyTable(): Promise<void> {
   copyingTable.value = true
   try {
     const currentConnection = connection.value
-    if (!currentConnection || !props.tab.database) return
-    const sql = await buildCopySql(copySource.value!, targetName, copyWithData.value)
-    const result = await store.executeWithApproval(currentConnection.id, sql, props.tab.database)
+    if (!currentConnection) return
+    const result = await store.executeOperationWithApproval(currentConnection.id, copyOperation(copySource.value!, targetName, copyWithData.value))
     if (result.status === 'ok') {
       message.success(t('sidebar.tableCopied', { source: source.name, target: targetName }))
       copyModalOpen.value = false
@@ -473,17 +496,16 @@ async function confirmCopyTable(): Promise<void> {
 async function confirmBatchCopyTables(): Promise<void> {
   const rowsToCopy = batchCopyRows.value
   const currentConnection = connection.value
-  if (!rowsToCopy.length || !currentConnection || !props.tab.database) return
+  if (!rowsToCopy.length || !currentConnection) return
   copyingTable.value = true
   let copied = 0
   try {
     for (const row of rowsToCopy) {
       const source = row.table
       if (!source || source.type !== 'table') continue
-      const result = await store.executeWithApproval(
+      const result = await store.executeOperationWithApproval(
         currentConnection.id,
-        await buildCopySql(row, `${source.name}_copy`, batchCopyWithData.value),
-        props.tab.database
+        copyOperation(row, `${source.name}_copy`, batchCopyWithData.value)
       )
       if (result.status !== 'ok') {
         if (result.status === 'denied') message.warning(result.error ?? '')
@@ -528,7 +550,7 @@ function createObject(): void {
   }
 }
 function designRow(row: ObjectRow): void {
-  if (!supportsStructure.value || !row?.table || row.table.type !== 'table') return
+  if ((!supportsStructure.value && !hasNativeIndexDesigner.value) || !row?.table || row.table.type !== 'table') return
   store.openTab({ type: 'structure', title: t('sidebar.designTitle', { name: row.table.name }), connectionId: props.tab.connectionId, database: props.tab.database, schema: row.table.schema, table: row.table.name })
 }
 function editSelectedObject(): void {
@@ -540,12 +562,18 @@ function editSelectedObject(): void {
 function dropRows(rowsToDrop: ObjectRow[]): void {
   const currentConnection = connection.value
   const database = props.tab.database
-  if (dropping.value || !currentConnection || !database || !supportsStructure.value) return
+  if (dropping.value || !currentConnection || currentConnection.permissionMode === 'readonly'
+    || !capabilities.value?.structuredOperations || !capabilities.value.objects.drop.supported) return
   const tableRows = rowsToDrop.filter((row) => row.table?.type === 'table')
   if (!tableRows.length) return
-  const sql = tableRows
-    .map((row) => `DROP TABLE ${qualifiedTable(currentConnection.type, database, row.table!.schema, row.table!.name)};`)
-    .join('\n')
+  const operations: DatabaseOperation[] = tableRows.map((row) => ({
+    kind: 'object.drop',
+    target: {
+      kind: capabilities.value!.recordTargetKind,
+      name: row.table!.name, database, schema: row.table!.schema
+    }
+  }))
+  const sql = operations.map((operation) => JSON.stringify(operation, null, 2)).join('\n')
   const batch = tableRows.length > 1
   const tableName = tableRows[0].table!.name
   dialog.error({
@@ -562,15 +590,21 @@ function dropRows(rowsToDrop: ObjectRow[]): void {
     onPositiveClick: async () => {
       dropping.value = true
       try {
-        const result = await store.executeWithApproval(currentConnection.id, sql, database)
-        if (result.status === 'ok') {
+        const results = []
+        for (const operation of operations) {
+          const response = await store.executeOperationWithApproval(currentConnection.id, operation)
+          results.push(response)
+          if (response.status !== 'ok') break
+        }
+        const result = results.find((item) => item.status !== 'ok') ?? results[0]
+        if (results.every((item) => item.status === 'ok')) {
           message.success(batch ? t('sidebar.tablesDropped', { count: tableRows.length }) : t('sidebar.dropped', { name: tableName }))
           selectedKey.value = null
           selectedKeys.value = []
           store.setObjectSelection(props.tab.id)
           await load()
-        } else if (result.status === 'denied') message.warning(result.error ?? '')
-        else if (result.status === 'error') message.error(result.error ?? '')
+        } else if (result?.status === 'denied') message.warning(result.error ?? '')
+        else if (result?.status === 'error') message.error(result.error ?? '')
       } finally {
         dropping.value = false
       }

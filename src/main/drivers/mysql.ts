@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise'
 import { normalizeMysqlSessionVariables } from '../core/nativeCommand'
 import type {
+  DatabaseOperation,
   ColumnInfo,
   CheckConstraintInfo,
   ForeignKeyInfo,
@@ -13,9 +14,12 @@ import {
   buildWhereClause,
   sanitizeRows,
   type DbDriver,
+  type DriverOperationResult,
   type TableDataQuery,
   type TableDataResult
 } from './base'
+import { capabilitiesForType } from './capabilities'
+import { compileRelationalOperation } from './relationalOperation'
 
 /** 反引号包裹标识符 */
 function quoteIdent(name: string): string {
@@ -23,6 +27,7 @@ function quoteIdent(name: string): string {
 }
 
 export class MysqlDriver implements DbDriver {
+  readonly capabilities = capabilitiesForType('mysql')
   private conn: mysql.Connection | null = null
 
   constructor(
@@ -340,6 +345,31 @@ export class MysqlDriver implements DbDriver {
     }
     const info = raw as { affectedRows?: number } | null | undefined
     return { kind: 'exec', affectedRows: info?.affectedRows ?? 0 }
+  }
+
+  async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const commands = compileRelationalOperation(operation, 'mysql', this.cfg.database)
+    const conn = this.requireConn()
+    const transactional = operation.kind === 'records.mutate' || operation.kind === 'records.clear'
+    if (transactional) await conn.beginTransaction()
+    let affectedRows = 0
+    try {
+      for (const command of commands) {
+        const [raw] = await conn.execute(command.sql, command.params as never[])
+        affectedRows += Number((raw as { affectedRows?: number }).affectedRows ?? 0)
+      }
+      if (transactional) await conn.commit()
+    } catch (error) {
+      if (transactional) await conn.rollback().catch(() => {})
+      throw error
+    }
+    const succeeded = operation.kind === 'records.mutate' ? operation.mutations.length : 1
+    return {
+      results: [{ kind: 'exec', affectedRows }],
+      atomicity: transactional ? 'transaction' : commands.length === 1 ? 'single-request' : 'best-effort',
+      succeeded,
+      failed: 0
+    }
   }
 
   async run(sql: string, database?: string): Promise<QueryResult[]> {

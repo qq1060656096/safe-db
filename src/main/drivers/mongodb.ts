@@ -1,5 +1,6 @@
 import { BSON, MongoClient, type ClientSession, type Db, type Document } from 'mongodb'
 import type {
+  DatabaseOperation,
   ColumnInfo,
   CheckConstraintInfo,
   ForeignKeyInfo,
@@ -9,7 +10,8 @@ import type {
   TableInfo
 } from '../../shared/types'
 import { classifyMongoCommand, parseMongoCommands } from '../core/nativeCommand'
-import type { DbDriver, TableDataQuery, TableDataResult } from './base'
+import type { DbDriver, DriverOperationResult, TableDataQuery, TableDataResult } from './base'
+import { capabilitiesForType } from './capabilities'
 
 function displayValue(value: unknown): unknown {
   if (value === null || value === undefined) return null
@@ -46,7 +48,28 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function structuredBsonValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const source = value.trim()
+    if (/^\{\s*"\$(?:oid|date|numberLong|numberDecimal|binary|timestamp)"/.test(source)) {
+      try { return BSON.EJSON.parse(source, { relaxed: true }) } catch {}
+    }
+    return value
+  }
+  if (Array.isArray(value)) return value.map(structuredBsonValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => [key, structuredBsonValue(item)]))
+  }
+  return value
+}
+
+function structuredDocument(value: Record<string, unknown>): Document {
+  return structuredBsonValue(value) as Document
+}
+
 export class MongoDriver implements DbDriver {
+  readonly capabilities = capabilitiesForType('mongodb')
   private client: MongoClient | null = null
 
   constructor(
@@ -228,9 +251,109 @@ export class MongoDriver implements DbDriver {
       columns,
       rows: documents.map(displayDocument),
       total,
-      editable: false,
+      editable: true,
       keyColumns: ['_id']
     }
+  }
+
+  async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const database = 'target' in operation
+      ? operation.target.database
+      : 'source' in operation ? operation.source.database
+        : operation.database
+    const db = this.db(database)
+    if (operation.kind === 'records.mutate') {
+      if (operation.target.kind !== 'collection') throw new Error('MongoDB 结构化操作目标必须是 Collection')
+      const writes = operation.mutations.map((mutation) => {
+        if (mutation.kind === 'insert') return { insertOne: { document: structuredDocument(mutation.values) } }
+        if (mutation.kind === 'delete') return { deleteOne: { filter: structuredDocument(mutation.key) } }
+        const changes = structuredDocument(mutation.changes)
+        if (Object.hasOwn(changes, '_id')) throw new Error('MongoDB 不允许修改 _id')
+        return { updateOne: { filter: structuredDocument(mutation.key), update: { $set: changes } } }
+      })
+      const result = await db.collection(operation.target.name).bulkWrite(writes, { ordered: true })
+      const affectedRows = result.insertedCount + result.modifiedCount + result.deletedCount + result.upsertedCount
+      return {
+        results: [{ kind: 'exec', affectedRows }],
+        atomicity: operation.mutations.length === 1 ? 'single-request' : 'best-effort',
+        succeeded: operation.mutations.length,
+        failed: 0
+      }
+    }
+    if (operation.kind === 'records.clear') {
+      if (operation.target.kind !== 'collection') throw new Error('MongoDB 清空目标必须是 Collection')
+      const result = await db.collection(operation.target.name).deleteMany({})
+      return {
+        results: [{ kind: 'exec', affectedRows: result.deletedCount }],
+        atomicity: 'single-request', succeeded: result.deletedCount, failed: 0
+      }
+    }
+    if (operation.kind === 'object.create') {
+      if (operation.objectType !== 'collection') throw new Error('MongoDB 只能创建 Collection')
+      await db.createCollection(operation.name, operation.definition)
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
+    if (operation.kind === 'object.drop') {
+      if (operation.target.kind !== 'collection') throw new Error('MongoDB 删除目标必须是 Collection')
+      await db.collection(operation.target.name).drop()
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
+    if (operation.kind === 'object.copy') {
+      if (operation.source.kind !== 'collection') throw new Error('MongoDB 只能复制 Collection')
+      const source = db.collection(operation.source.name)
+      const info = await db.listCollections({ name: operation.source.name }, { nameOnly: false }).next()
+      await db.createCollection(operation.targetName, info?.options ?? {})
+      const sourceIndexes = await source.indexes()
+      const copiedIndexes = sourceIndexes.filter((index) => index.name !== '_id_').map((index) => {
+        const { v: _v, ns: _ns, ...definition } = index
+        return definition
+      })
+      if (copiedIndexes.length) await db.command({ createIndexes: operation.targetName, indexes: copiedIndexes })
+      let copied = 0
+      if (operation.withData) {
+        const target = db.collection(operation.targetName)
+        let batch: Document[] = []
+        for await (const document of source.find({})) {
+          batch.push(document)
+          if (batch.length === 1_000) {
+            await target.insertMany(batch, { ordered: true })
+            copied += batch.length
+            batch = []
+          }
+        }
+        if (batch.length) {
+          await target.insertMany(batch, { ordered: true })
+          copied += batch.length
+        }
+      }
+      return {
+        results: [{ kind: 'exec', affectedRows: copied }], atomicity: 'best-effort', succeeded: 1, failed: 0
+      }
+    }
+    if (operation.kind === 'index.create') {
+      if (operation.target.kind !== 'collection') throw new Error('MongoDB 索引目标必须是 Collection')
+      const rawKeys = operation.definition.keys
+      const columns = operation.definition.columns
+      const keys: Record<string, 1 | -1 | 'text'> = rawKeys && typeof rawKeys === 'object' && !Array.isArray(rawKeys)
+        ? rawKeys as Record<string, 1 | -1 | 'text'>
+        : Array.isArray(columns)
+          ? Object.fromEntries(columns.map((column) => [String(column), 1]))
+          : {}
+      if (!Object.keys(keys).length) throw new Error('MongoDB 索引定义必须包含 keys 或 columns')
+      await db.collection(operation.target.name).createIndex(keys, {
+        name: operation.name,
+        unique: operation.definition.unique === true,
+        sparse: operation.definition.sparse === true
+      })
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
+    if (operation.kind === 'index.drop') {
+      if (operation.target.kind !== 'collection') throw new Error('MongoDB 索引目标必须是 Collection')
+      if (operation.name === '_id_') throw new Error('MongoDB 主键索引不能删除')
+      await db.collection(operation.target.name).dropIndex(operation.name)
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
+    throw new Error(`MongoDB 尚未接入结构化操作：${operation.kind}`)
   }
 
   private responseResult(command: Document, response: Document): QueryResult {

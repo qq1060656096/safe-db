@@ -1,4 +1,4 @@
-import type { ConnectionConfig } from '../../shared/types'
+import type { ConnectionConfig, DriverCapabilities } from '../../shared/types'
 import { SshTunnelManager } from '../ssh/tunnel'
 import type { DbDriver } from './base'
 import { MysqlDriver } from './mysql'
@@ -7,6 +7,8 @@ import { SqliteDriver } from './sqlite'
 import { SqlServerDriver } from './sqlserver'
 import { MongoDriver } from './mongodb'
 import { RedisDriver } from './redis'
+import { QdrantDriver } from './qdrant'
+import { capabilitiesForType } from './capabilities'
 
 /** 数据库实际接入点;启用 SSH 隧道时为 127.0.0.1:本地转发端口 */
 export interface DbEndpoint {
@@ -63,6 +65,15 @@ export function createDriver(cfg: ConnectionConfig, endpoint?: DbEndpoint): DbDr
         password: cfg.password,
         database: cfg.database,
         tls: cfg.tls
+      })
+    case 'qdrant':
+      return new QdrantDriver({
+        host: endpoint?.host ?? cfg.host ?? '127.0.0.1',
+        port: endpoint?.port ?? cfg.port ?? 6333,
+        apiKey: cfg.apiKey,
+        // SSH 只做 TCP 转发，不得静默降级用户选择的 HTTPS。
+        tls: cfg.tls,
+        timeoutMs: cfg.timeoutMs
       })
     default:
       throw new Error(`不支持的数据库类型：${String((cfg as { type?: unknown }).type ?? '未指定')}`)
@@ -194,5 +205,12 @@ export class DriverManager {
 
   isConnected(id: string): boolean {
     return this.drivers.has(id)
+  }
+
+  /** 获取能力不建立远程连接，菜单和空状态也能稳定按能力渲染。 */
+  capabilities(id: string): DriverCapabilities {
+    const cfg = this.getConfig(id)
+    if (!cfg) throw new Error('连接不存在')
+    return this.drivers.get(id)?.capabilities ?? capabilitiesForType(cfg.type)
   }
 }

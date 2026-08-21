@@ -91,6 +91,10 @@ async function loadDdlWithReadQuery(tab: NonNullable<typeof activeTab.value>, cu
     return `${value.trim().replace(/;\s*$/, '')};`
   }
 
+  if (currentConnection.type === 'qdrant') {
+    return window.api.getObjectDdl(currentConnection.id, tab.database, table, tab.schema)
+  }
+
   if (currentConnection.type === 'sqlserver' || currentConnection.type === 'mongodb' || currentConnection.type === 'redis') {
     throw new Error(t('panel.ddlUnavailable'))
   }
@@ -136,7 +140,7 @@ async function loadRoutineWithReadQuery(tab: NonNullable<typeof activeTab.value>
   const routine = tab.routine!
   const routineType = tab.routineType ?? 'function'
   if (currentConnection.type === 'sqlite') throw new Error(t('panel.routineDefinitionUnavailable'))
-  if (currentConnection.type === 'sqlserver' || currentConnection.type === 'mongodb' || currentConnection.type === 'redis') throw new Error(t('panel.routineDefinitionUnavailable'))
+  if (currentConnection.type === 'sqlserver' || currentConnection.type === 'mongodb' || currentConnection.type === 'redis' || currentConnection.type === 'qdrant') throw new Error(t('panel.routineDefinitionUnavailable'))
   if (currentConnection.type === 'mysql') {
     const database = tab.database ?? currentConnection.database
     if (!database) throw new Error(t('panel.databaseRequired'))

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onMounted, ref, watch } from 'vue'
 import { ColumnWidthOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FilterOutlined, PlusOutlined, ReloadOutlined, SaveOutlined, UndoOutlined } from '@vicons/antd'
-import { NAlert, NButton, NDataTable, NDropdown, NIcon, NInput, NPagination, NSelect, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
+import { NAlert, NButton, NCard, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NPagination, NSelect, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { ColumnFilter, ColumnInfo, DbType, TableDataResult } from '../../../shared/types'
+import type { ColumnFilter, ColumnInfo, DatabaseOperation, DbType, RecordMutation, TableDataResult } from '../../../shared/types'
+import { useContextMenuDismiss } from '../contextMenu'
 import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
 import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, tableColumnLayoutScope, useLayoutStore } from '../stores/layout'
@@ -21,6 +22,9 @@ const data = ref<TableDataResult | null>(null)
 const loading = ref(false)
 const page = ref(1)
 const pageSize = ref(100)
+const cursorHistory = ref<Array<string | number | undefined>>([undefined])
+const includeVectors = ref(false)
+let loadRequest = 0
 const orderBy = ref<{ column: string; direction: 'asc' | 'desc' }[]>([])
 const edits = ref(new Map<string, Map<string, unknown>>())
 const newRows = ref<NewRow[]>([])
@@ -37,6 +41,10 @@ const columnMenuTarget = ref<{ column: string; kind: 'header' | 'cell'; value?: 
 const selectedColumns = ref<string[]>([])
 const lastSelectedColumnIndex = ref<number | null>(null)
 const tableRoot = ref<HTMLElement | null>(null)
+useContextMenuDismiss(() => {
+  rowMenuShow.value = false
+  columnMenuShow.value = false
+})
 const selectedColumnSet = new Set<string>()
 const columnLayoutScope = computed(() => tableColumnLayoutScope({
   connectionId: props.tab.connectionId,
@@ -48,11 +56,23 @@ const columnWidths = ref<Record<string, number>>({})
 const tableInstanceKey = ref(0)
 const editingCell = ref<{ rowKey: string; column: string } | null>(null)
 const saving = ref(false)
+const insertPointOpen = ref(false)
+const insertingPoint = ref(false)
+const pointIdInput = ref('')
+const pointVectorInput = ref('')
+const pointPayloadInput = ref('{}')
 const showFilter = ref(false)
 const filterInputs = ref<Record<string, FilterInput>>({})
 const appliedFilters = ref<ColumnFilter[]>([])
 const exporting = ref(false)
 const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
+const capabilities = computed(() => props.tab.connectionId ? store.driverCapabilities[props.tab.connectionId] : undefined)
+const isNative = computed(() => capabilities.value?.recordModel !== undefined && capabilities.value.recordModel !== 'row')
+const isQdrant = computed(() => capabilities.value?.recordModel === 'point')
+const writableConnection = computed(() => connection.value?.permissionMode !== 'readonly')
+const canInsert = computed(() => writableConnection.value && capabilities.value?.records.insert.supported === true && data.value?.recordOperations?.insert !== false)
+const canUpdate = computed(() => writableConnection.value && capabilities.value?.records.update.supported === true && data.value?.recordOperations?.update !== false)
+const canDelete = computed(() => writableConnection.value && capabilities.value?.records.delete.supported === true && data.value?.recordOperations?.delete !== false)
 const keyColumns = computed(() => data.value?.keyColumns ?? [])
 const baseRows = computed(() => data.value?.rows ?? [])
 const columnNames = computed(() => (data.value?.columns ?? []).map((column) => column.name))
@@ -77,9 +97,8 @@ const rowCopyOptions = computed<DropdownOption[]>(() => {
     { key: 'values', label: t('query.copyColumnValues') },
     { key: 'headers', label: t('query.copyColumnNames') }
   ]
-  const native = connection.value?.type === 'mongodb' || connection.value?.type === 'redis'
   const copyAsOptions: DropdownOption[] = [
-    ...(native ? [] : [
+    ...(isNative.value ? [] : [
       { key: 'select', label: 'SELECT' },
       { key: 'insert', label: 'INSERT' },
       { key: 'update', label: 'UPDATE' },
@@ -108,8 +127,10 @@ const columnCopyOptions = computed<DropdownOption[]>(() => {
       : [])
   ]
 })
-const readOnlyHelp = computed(() => connection.value?.type === 'mongodb' || connection.value?.type === 'redis'
-  ? t('grid.nativeReadOnlyHelp') : t('grid.noPrimaryKeyHelp'))
+const readOnlyHelp = computed(() => isQdrant.value
+  ? t('grid.qdrantGridHelp')
+  : data.value?.recordOperations?.update === false ? t('grid.partialRecordHelp')
+  : isNative.value ? t('grid.nativeReadOnlyHelp') : t('grid.noPrimaryKeyHelp'))
 
 const numericTypes = /^(tinyint|smallint|mediumint|int|integer|bigint|serial|bigserial|decimal|numeric|float|double|real|number|money)/i
 function quoteIdentifier(type: DbType | undefined, name: string): string {
@@ -126,7 +147,9 @@ function toLiteral(value: unknown, column: ColumnInfo | undefined, type: DbType 
   if (/^(boolean)$/i.test(column?.dataType ?? '') && /^(true|false)$/i.test(stringValue)) return stringValue.toLowerCase()
   return "'" + stringValue.replace(/'/g, "''") + "'"
 }
-function rowKeyOf(row: Record<string, unknown>): string { return keyColumns.value.map((key) => String(row[key] ?? '')).join('') }
+function rowKeyOf(row: Record<string, unknown>): string {
+  return JSON.stringify(keyColumns.value.map((key) => row[key] ?? null))
+}
 function currentFilter(column: ColumnInfo): FilterInput {
   return filterInputs.value[column.name] ?? { op: isNumericColumn(column) ? '=' : 'like', value: '' }
 }
@@ -145,12 +168,21 @@ function buildFilters(): ColumnFilter[] {
 }
 async function load(): Promise<void> {
   if (!props.tab.connectionId || !props.tab.table) return
+  const request = ++loadRequest
   loading.value = true
   try {
-    data.value = await store.getTableData(props.tab.connectionId, {
+    const result = await store.getTableData(props.tab.connectionId, {
       database: props.tab.database, schema: props.tab.schema, table: props.tab.table, page: page.value, pageSize: pageSize.value,
+      cursor: cursorHistory.value[page.value - 1], includeVectors: includeVectors.value,
       orderBy: orderBy.value, filters: appliedFilters.value
     })
+    if (request !== loadRequest) return
+    data.value = result
+    if (data.value.paginationMode === 'cursor') {
+      const history = cursorHistory.value.slice(0, page.value)
+      if (data.value.nextCursor !== undefined) history[page.value] = data.value.nextCursor
+      cursorHistory.value = history
+    }
     selectedKeys.value = []
     lastSelectedRowIndex.value = null
     rowMenuShow.value = false
@@ -160,10 +192,23 @@ async function load(): Promise<void> {
     if (selectedColumns.value.length === 0) lastSelectedColumnIndex.value = null
     await nextTick()
     syncColumnHighlights()
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
-  finally { loading.value = false }
+  } catch (error) {
+    if (request === loadRequest) message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    if (request === loadRequest) loading.value = false
+  }
 }
-watch([page, pageSize, orderBy, appliedFilters], load, { deep: true })
+watch([page, orderBy, appliedFilters], load, { deep: true })
+watch(includeVectors, () => {
+  cursorHistory.value = [undefined]
+  if (page.value === 1) void load()
+  else page.value = 1
+})
+watch(pageSize, () => {
+  cursorHistory.value = [undefined]
+  if (page.value === 1) void load()
+  else page.value = 1
+})
 watch(
   () => [columnLayoutScope.value, layoutStore.revision],
   () => {
@@ -181,51 +226,171 @@ function commitCell(rowKey: string, column: string, raw: string, isNew: boolean)
   editingCell.value = null
 }
 function addRow(): void { newRows.value = [{ tempId: `new:${crypto.randomUUID()}`, values: {} }, ...newRows.value] }
+function openInsertPoint(): void {
+  if (!isQdrant.value || connection.value?.permissionMode === 'readonly') return
+  pointIdInput.value = crypto.randomUUID()
+  pointVectorInput.value = ''
+  pointPayloadInput.value = '{}'
+  insertPointOpen.value = true
+}
+function closeInsertPoint(): void {
+  if (insertingPoint.value) return
+  insertPointOpen.value = false
+}
+function pointIdValue(): string | number {
+  const source = pointIdInput.value.trim()
+  if (!source) throw new Error(t('grid.pointIdRequired'))
+  if (/^(0|[1-9]\d*)$/.test(source)) {
+    const value = Number(source)
+    if (!Number.isSafeInteger(value)) throw new Error(t('grid.pointIdUnsafeInteger'))
+    return value
+  }
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(source)) {
+    throw new Error(t('grid.pointIdInvalid'))
+  }
+  return source
+}
+function jsonObjectInput(source: string, errorKey: string): Record<string, unknown> {
+  let value: unknown
+  try { value = JSON.parse(source) }
+  catch { throw new Error(t(errorKey)) }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(t(errorKey))
+  return value as Record<string, unknown>
+}
+function vectorValue(): unknown[] | Record<string, unknown> {
+  let value: unknown
+  try { value = JSON.parse(pointVectorInput.value) }
+  catch { throw new Error(t('grid.pointVectorInvalid')) }
+  if (!value || typeof value !== 'object') throw new Error(t('grid.pointVectorInvalid'))
+  return value as unknown[] | Record<string, unknown>
+}
+async function insertQdrantPoint(): Promise<void> {
+  if (!props.tab.connectionId || !props.tab.table || !isQdrant.value) return
+  let id: string | number
+  let vector: unknown[] | Record<string, unknown>
+  let payload: Record<string, unknown>
+  try {
+    id = pointIdValue()
+    vector = vectorValue()
+    payload = jsonObjectInput(pointPayloadInput.value.trim() || '{}', 'grid.pointPayloadInvalid')
+  } catch (error) {
+    message.warning(error instanceof Error ? error.message : String(error))
+    return
+  }
+  insertingPoint.value = true
+  try {
+    const result = await store.executeOperationWithApproval(props.tab.connectionId, {
+      kind: 'records.mutate',
+      target: {
+        kind: capabilities.value?.recordTargetKind ?? 'collection', name: props.tab.table,
+        database: props.tab.database, schema: props.tab.schema
+      },
+      mutations: [{ kind: 'insert', values: { id, vector, payload } }]
+    })
+    if (result.status === 'ok') {
+      message.success(t('grid.pointInserted', { id: String(id) }))
+      insertPointOpen.value = false
+      resetCursor()
+      await load()
+    } else if (result.status === 'denied') message.warning(result.error ?? '')
+    else if (result.status === 'error') message.error(t('grid.pointInsertFailed', { error: result.error ?? '' }))
+  } catch (error) {
+    message.error(t('grid.pointInsertFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    insertingPoint.value = false
+  }
+}
 function deleteSelected(): void { deletedKeys.value = new Set([...deletedKeys.value, ...selectedKeys.value.map(String)]); selectedKeys.value = [] }
-function buildSql(): string {
-  const type = connection.value?.type
-  const qi = (name: string): string => quoteIdentifier(type, name)
-  const table = props.tab.table!
-  const qualified = type === 'postgres' ? `${qi(props.tab.schema ?? 'public')}.${qi(table)}` : type === 'sqlserver' ? `${qi(props.tab.schema ?? 'dbo')}.${qi(table)}` : props.tab.database ? `${qi(props.tab.database)}.${qi(table)}` : qi(table)
-  const columnOf = (name: string): ColumnInfo | undefined => data.value?.columns.find((column) => column.name === name)
-  const statements: string[] = []
+function operationValue(column: string, value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  if (capabilities.value?.recordModel === 'point'
+    && (column.startsWith('payload.') || column === 'payload' || column === 'vector')) {
+    try { return JSON.parse(value) }
+    catch { return value }
+  }
+  if (capabilities.value?.recordModel === 'document') {
+    const dataType = data.value?.columns.find((item) => item.name === column)?.dataType ?? ''
+    if (/(^|\s|\|)(object|array)(\s|\||$)/i.test(dataType)) {
+      try { return JSON.parse(value) }
+      catch { return value }
+    }
+  }
+  return value
+}
+function mutationKey(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(keyColumns.value.map((column) => [column, row[column]]))
+}
+function buildOperation(): DatabaseOperation | null {
+  if (!props.tab.table) return null
+  const mutations: RecordMutation[] = []
   for (const row of baseRows.value) {
     const key = rowKeyOf(row)
-    if (deletedKeys.value.has(key)) {
-      const where = keyColumns.value.map((column) => `${qi(column === '__rowid__' ? 'rowid' : column)} = ${toLiteral(row[column], undefined, type)}`).join(' AND ')
-      statements.push(`DELETE FROM ${qualified} WHERE ${where};`)
-    }
+    if (deletedKeys.value.has(key)) mutations.push({ kind: 'delete', key: mutationKey(row) })
   }
   for (const [key, values] of edits.value) {
     if (deletedKeys.value.has(key) || values.size === 0) continue
     const row = baseRows.value.find((item) => rowKeyOf(item) === key)
     if (!row) continue
-    const set = [...values].map(([column, value]) => `${qi(column)} = ${toLiteral(value, columnOf(column), type)}`).join(', ')
-    const where = keyColumns.value.map((column) => `${qi(column === '__rowid__' ? 'rowid' : column)} = ${toLiteral(row[column], undefined, type)}`).join(' AND ')
-    statements.push(`UPDATE ${qualified} SET ${set} WHERE ${where};`)
+    mutations.push({
+      kind: 'update', key: mutationKey(row),
+      changes: Object.fromEntries([...values].map(([column, value]) => [column, operationValue(column, value)]))
+    })
   }
   for (const row of newRows.value) {
-    const entries = Object.entries(row.values).filter(([, value]) => value !== undefined)
-    if (!entries.length) continue
-    statements.push(`INSERT INTO ${qualified} (${entries.map(([column]) => qi(column)).join(', ')}) VALUES (${entries.map(([column, value]) => toLiteral(value, columnOf(column), type)).join(', ')});`)
+    const values = Object.fromEntries(Object.entries(row.values)
+      .filter(([, value]) => value !== undefined)
+      .map(([column, value]) => [column, operationValue(column, value)]))
+    if (Object.keys(values).length) mutations.push({ kind: 'insert', values })
   }
-  return statements.join('\n')
+  if (!mutations.length) return null
+  return {
+    kind: 'records.mutate',
+    target: {
+      kind: capabilities.value?.recordTargetKind ?? 'table', name: props.tab.table,
+      database: props.tab.database, schema: props.tab.schema
+    },
+    mutations
+  }
 }
 async function save(): Promise<void> {
-  const sql = buildSql()
-  if (!sql || !props.tab.connectionId) return
+  if (!props.tab.connectionId) return
   saving.value = true
   try {
-    const result = await store.executeWithApproval(props.tab.connectionId, sql, props.tab.database)
+    if (!capabilities.value?.structuredOperations) throw new Error(t('grid.structuredOperationUnavailable'))
+    const operation = buildOperation()
+    const result = operation ? await store.executeOperationWithApproval(props.tab.connectionId, operation) : null
+    if (!result) return
     if (result.status === 'ok') { message.success(t('common.saved')); resetEdits(); await load() }
     else if (result.status === 'denied') message.warning(result.error ?? '')
     else if (result.status === 'error') message.error(result.error ?? '')
   } finally { saving.value = false }
 }
-function applyFilters(): void { page.value = 1; appliedFilters.value = buildFilters() }
-function clearFilters(): void { filterInputs.value = {}; appliedFilters.value = []; page.value = 1 }
+function resetCursor(): void { page.value = 1; cursorHistory.value = [undefined] }
+function applyFilters(): void { resetCursor(); appliedFilters.value = buildFilters() }
+function clearFilters(): void { filterInputs.value = {}; appliedFilters.value = []; resetCursor() }
 function projectRows(columns: ColumnInfo[], rows: Record<string, unknown>[]): Record<string, unknown>[] {
   return rows.map((row) => Object.fromEntries(columns.map((column) => [column.name, row[column.name]])))
+}
+async function loadCursorRows(cap: number): Promise<{ columns: ColumnInfo[]; rows: Record<string, unknown>[] }> {
+  const rows: Record<string, unknown>[] = []
+  let columns = data.value?.columns ?? []
+  let cursor: string | number | undefined
+  const seen = new Set<string>()
+  while (rows.length < cap) {
+    const result = await store.getTableData(props.tab.connectionId!, {
+      database: props.tab.database, schema: props.tab.schema, table: props.tab.table!, page: 1,
+      pageSize: Math.min(500, cap - rows.length), cursor, includeVectors: includeVectors.value,
+      orderBy: orderBy.value, filters: appliedFilters.value
+    })
+    columns = result.columns
+    rows.push(...result.rows)
+    if (result.nextCursor === undefined) break
+    const key = JSON.stringify(result.nextCursor)
+    if (seen.has(key)) break
+    seen.add(key)
+    cursor = result.nextCursor
+  }
+  return { columns, rows }
 }
 async function exportData(format: 'csv' | 'json', scope: 'page' | 'all'): Promise<void> {
   if (!data.value || !props.tab.connectionId) return
@@ -236,11 +401,17 @@ async function exportData(format: 'csv' | 'json', scope: 'page' | 'all'): Promis
     let capped = false
     if (scope === 'all') {
       const cap = 50000
-      const result = await store.getTableData(props.tab.connectionId, {
-        database: props.tab.database, schema: props.tab.schema, table: props.tab.table!, page: 1,
-        pageSize: Math.min(data.value.total, cap), orderBy: orderBy.value, filters: appliedFilters.value
-      })
-      columns = result.columns; rows = result.rows; capped = data.value.total > cap
+      if (data.value.paginationMode === 'cursor') {
+        const result = await loadCursorRows(cap)
+        columns = result.columns; rows = result.rows
+      } else {
+        const result = await store.getTableData(props.tab.connectionId, {
+          database: props.tab.database, schema: props.tab.schema, table: props.tab.table!, page: 1,
+          pageSize: Math.min(data.value.total, cap), orderBy: orderBy.value, filters: appliedFilters.value
+        })
+        columns = result.columns; rows = result.rows
+      }
+      capped = data.value.total > cap
     }
     const projected = projectRows(columns, rows)
     const content = format === 'csv' ? toCsv(columns.map((column) => column.name), projected) : toJson(projected)
@@ -476,10 +647,12 @@ function renderCell(value: unknown, row: Record<string, unknown>, column: Column
     })
   }
   const modified = isNew ? newRows.value.find((item) => item.tempId === rowKey)?.values[column.name] !== undefined : edits.value.get(rowKey)?.has(column.name)
+  const editable = data.value?.editable && (isNew ? canInsert.value : canUpdate.value) && (isNew || !column.isPrimaryKey)
+    && (!isQdrant.value || column.name !== 'vector' || includeVectors.value)
   return h('div', {
-    class: ['grid-cell-editable', modified && 'grid-cell-edited'],
+    class: [editable && 'grid-cell-editable', modified && 'grid-cell-edited'],
     onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', current),
-    onDblclick: () => { if (data.value?.editable) editingCell.value = { rowKey, column: column.name } }
+    onDblclick: () => { if (editable) editingCell.value = { rowKey, column: column.name } }
   }, current == null ? h(NText, { depth: 3 }, { default: () => t('common.nullValue') }) : String(current))
 }
 const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
@@ -507,7 +680,8 @@ const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
       fixed: column.isPrimaryKey ? 'left' as const : undefined,
       className: 'copyable-data-column',
       cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
-      ellipsis: { tooltip: true }, sorter: 'default' as const,
+      ellipsis: { tooltip: true },
+      sorter: isQdrant.value && ['id', 'payload', 'vector'].includes(column.name) ? false : 'default' as const,
       sortOrder: orderBy.value[0]?.column === column.name ? (orderBy.value[0].direction === 'asc' ? 'ascend' as const : 'descend' as const) : false as const,
       render: (row: Record<string, unknown>) => renderCell(row[column.name], row, column)
     }))
@@ -570,8 +744,10 @@ function selectTableRowMenu(kind: string | number): void {
 }
 function updateSorter(sorter: DataTableSortState | null): void {
   orderBy.value = sorter?.order && sorter.columnKey ? [{ column: String(sorter.columnKey), direction: sorter.order === 'ascend' ? 'asc' : 'desc' }] : []
-  page.value = 1
+  resetCursor()
 }
+function previousCursorPage(): void { if (page.value > 1) page.value -= 1 }
+function nextCursorPage(): void { if (data.value?.nextCursor !== undefined) page.value += 1 }
 </script>
 
 <template>
@@ -581,12 +757,13 @@ function updateSorter(sorter: DataTableSortState | null): void {
       <NButton size="small" :type="showFilter || activeFilterCount ? 'primary' : 'default'" :secondary="activeFilterCount > 0" @click="showFilter = !showFilter"><template #icon><NIcon><FilterOutlined /></NIcon></template>{{ t('grid.filter') }}<template v-if="activeFilterCount"> ({{ activeFilterCount }})</template></NButton>
       <NDropdown :options="exportOptions" :disabled="!data || data.rows.length === 0" @select="onExportSelect"><NButton size="small" :loading="exporting"><template #icon><NIcon><DownloadOutlined /></NIcon></template>{{ t('common.export') }}</NButton></NDropdown>
       <NButton size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnWidths"><template #icon><NIcon><ColumnWidthOutlined /></NIcon></template>{{ t('layout.resetColumns') }}</NButton>
+      <NButton v-if="isQdrant" size="small" :type="includeVectors ? 'primary' : 'default'" @click="includeVectors = !includeVectors">{{ t(includeVectors ? 'grid.hideVectors' : 'grid.showVectors') }}</NButton>
       <NDropdown trigger="click" :options="rowCopyOptions" :disabled="selectedKeys.length === 0" @select="copySelected"><NButton size="small" :disabled="selectedKeys.length === 0"><template #icon><NIcon><CopyOutlined /></NIcon></template>{{ t('query.copy') }}<template v-if="selectedKeys.length"> ({{ selectedKeys.length }})</template></NButton></NDropdown>
-      <NButton size="small" :disabled="!data?.editable" @click="addRow"><template #icon><NIcon><PlusOutlined /></NIcon></template>{{ t('grid.addRow') }}</NButton>
-      <NButton size="small" type="error" secondary :disabled="!data?.editable || selectedKeys.length === 0" @click="deleteSelected"><template #icon><NIcon><DeleteOutlined /></NIcon></template>{{ t('grid.deleteRow') }}</NButton>
+      <NButton size="small" :disabled="!data?.editable || !canInsert" @click="isQdrant ? openInsertPoint() : addRow()"><template #icon><NIcon><PlusOutlined /></NIcon></template>{{ t(isQdrant ? 'grid.addPoint' : 'grid.addRow') }}</NButton>
+      <NButton size="small" type="error" secondary :disabled="!data?.editable || !canDelete || selectedKeys.length === 0" @click="deleteSelected"><template #icon><NIcon><DeleteOutlined /></NIcon></template>{{ t('grid.deleteRow') }}</NButton>
       <NButton size="small" :disabled="dirtyCount === 0" @click="resetEdits"><template #icon><NIcon><UndoOutlined /></NIcon></template>{{ t('grid.discard') }}</NButton>
-      <NButton size="small" type="primary" :disabled="dirtyCount === 0 || !data?.editable" :loading="saving" @click="save"><template #icon><NIcon><SaveOutlined /></NIcon></template>{{ dirtyCount ? t('grid.saveCount', { count: dirtyCount }) : t('common.save') }}</NButton>
-      <span class="toolbar-meta"><NTag v-if="data && !data.editable">{{ t('grid.noPrimaryKey') }}</NTag><NTag v-if="connection?.permissionMode === 'readonly'" type="info">{{ t('permission.readonlyMode') }}</NTag><NTag v-if="connection?.permissionMode === 'approval'" type="warning">{{ t('permission.approvalMode') }}</NTag></span>
+      <NButton size="small" type="primary" :disabled="dirtyCount === 0 || !data?.editable || (!canUpdate && !canDelete && !canInsert)" :loading="saving" @click="save"><template #icon><NIcon><SaveOutlined /></NIcon></template>{{ dirtyCount ? t('grid.saveCount', { count: dirtyCount }) : t('common.save') }}</NButton>
+      <span class="toolbar-meta"><NTag v-if="data && !data.editable">{{ isNative ? t('permission.readonly') : t('grid.noPrimaryKey') }}</NTag><NTag v-if="connection?.permissionMode === 'readonly'" type="info">{{ t('permission.readonlyMode') }}</NTag><NTag v-if="connection?.permissionMode === 'approval'" type="warning">{{ t('permission.approvalMode') }}</NTag></span>
     </div>
     <div v-if="showFilter && data" class="filter-panel">
       <p class="filter-help">{{ t('grid.filterHelp') }}</p>
@@ -599,12 +776,35 @@ function updateSorter(sorter: DataTableSortState | null): void {
       </div>
       <div class="filter-actions"><NButton size="small" type="primary" @click="applyFilters">{{ t('common.apply') }}</NButton><NButton size="small" :disabled="activeFilterCount === 0 && Object.keys(filterInputs).length === 0" @click="clearFilters">{{ t('common.clear') }}</NButton></div>
     </div>
-    <NAlert v-if="data && !data.editable" type="info" class="module-alert">{{ readOnlyHelp }}</NAlert>
+    <NAlert v-if="data && (!data.editable || isQdrant || data.recordOperations?.update === false)" type="info" class="module-alert">{{ readOnlyHelp }}</NAlert>
     <div ref="tableRoot" class="data-table-wrap padded" @click.capture="selectColumnFromHeader" @contextmenu.capture="openColumnMenuFromHeader">
       <NDataTable :key="tableInstanceKey" remote size="small" bordered :loading="loading" :columns="tableColumns" :data="tableRows" :row-key="(row: Record<string, unknown>) => String(row.__tempId ?? row.__rowKey)" :checked-row-keys="selectedKeys" :row-class-name="rowClassName" :row-props="(row: Record<string, unknown>) => ({ onClick: (event: MouseEvent) => selectTableRow(event, row), onContextmenu: (event: MouseEvent) => openTableRowMenu(event, row) })" :pagination="false" :scroll-x="Math.max(900, tableScrollX)" :on-unstable-column-resize="updateColumnWidth" @update:checked-row-keys="updateSelectedKeys" @update:sorter="updateSorter" />
     </div>
     <NDropdown trigger="manual" placement="bottom-start" :show="rowMenuShow" :x="rowMenuX" :y="rowMenuY" :options="rowCopyOptions" @select="selectTableRowMenu" @clickoutside="rowMenuShow = false" />
     <NDropdown trigger="manual" placement="bottom-start" :show="columnMenuShow" :x="columnMenuX" :y="columnMenuY" :options="columnCopyOptions" @select="copyColumnItem" @clickoutside="columnMenuShow = false" />
-    <NPagination v-if="data" v-model:page="page" v-model:page-size="pageSize" :item-count="data.total + newRows.length" :page-sizes="[50, 100, 200, 500]" show-size-picker class="module-pagination"><template #prefix>{{ t('common.totalRows', { count: data.total + newRows.length }) }}</template></NPagination>
+    <div v-if="data?.paginationMode === 'cursor'" class="module-pagination cursor-pagination">
+      <span>{{ t('common.totalRows', { count: data.total }) }}</span>
+      <NSelect v-model:value="pageSize" size="small" :options="[50, 100, 200, 500].map((value) => ({ label: String(value), value }))" class="cursor-page-size" />
+      <NButton size="small" :disabled="page <= 1" @click="previousCursorPage">{{ t('grid.previousPage') }}</NButton>
+      <span>{{ t('grid.pageNumber', { page }) }}</span>
+      <NButton size="small" :disabled="data.nextCursor === undefined" @click="nextCursorPage">{{ t('grid.nextPage') }}</NButton>
+    </div>
+    <NPagination v-else-if="data" v-model:page="page" v-model:page-size="pageSize" :item-count="data.total + newRows.length" :page-sizes="[50, 100, 200, 500]" show-size-picker class="module-pagination"><template #prefix>{{ t('common.totalRows', { count: data.total + newRows.length }) }}</template></NPagination>
+    <NModal :show="insertPointOpen" :mask-closable="!insertingPoint" @update:show="(show) => { if (!show) closeInsertPoint() }">
+      <NCard class="copy-table-modal" :title="t('grid.addPointTitle', { collection: tab.table ?? '' })" closable @close="closeInsertPoint">
+        <NFormItem :label="t('grid.pointId')" required>
+          <NInput v-model:value="pointIdInput" autofocus :disabled="insertingPoint" :placeholder="t('grid.pointIdPlaceholder')" />
+        </NFormItem>
+        <NFormItem :label="t('grid.pointVector')" required>
+          <NInput v-model:value="pointVectorInput" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" :disabled="insertingPoint" :placeholder="t('grid.pointVectorPlaceholder')" />
+        </NFormItem>
+        <NFormItem :label="t('grid.pointPayload')">
+          <NInput v-model:value="pointPayloadInput" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" :disabled="insertingPoint" :placeholder="t('grid.pointPayloadPlaceholder')" />
+        </NFormItem>
+        <template #footer>
+          <div class="modal-actions"><NButton :disabled="insertingPoint" @click="closeInsertPoint">{{ t('common.cancel') }}</NButton><NButton type="primary" :loading="insertingPoint" @click="insertQdrantPoint">{{ t('grid.insertPoint') }}</NButton></div>
+        </template>
+      </NCard>
+    </NModal>
   </div>
 </template>

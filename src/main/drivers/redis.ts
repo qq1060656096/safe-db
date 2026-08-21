@@ -1,5 +1,6 @@
 import { createClient } from 'redis'
 import type {
+  DatabaseOperation,
   ColumnInfo,
   CheckConstraintInfo,
   ForeignKeyInfo,
@@ -9,7 +10,8 @@ import type {
   TableInfo
 } from '../../shared/types'
 import { classifyRedisCommand, parseRedisCommands, type RedisCommandInput } from '../core/nativeCommand'
-import type { DbDriver, TableDataQuery, TableDataResult } from './base'
+import type { DbDriver, DriverOperationResult, TableDataQuery, TableDataResult } from './base'
+import { capabilitiesForType } from './capabilities'
 
 function newRedisClient(url: string, database: number) {
   return createClient({ url, database })
@@ -37,6 +39,23 @@ function displayValue(value: unknown): unknown {
   return value
 }
 
+function redisScalar(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function streamFields(value: unknown): string[] {
+  let document = value
+  if (typeof value === 'string') {
+    try { document = JSON.parse(value) } catch { document = { value } }
+  }
+  if (!document || typeof document !== 'object' || Array.isArray(document)) document = { value: document }
+  const fields = Object.entries(document as Record<string, unknown>).flatMap(([name, item]) => [name, redisScalar(item)])
+  if (!fields.length) throw new Error('Redis Stream 记录至少需要一个字段')
+  return fields
+}
+
 function matchesFilters(row: Record<string, unknown>, query: TableDataQuery): boolean {
   return (query.filters ?? []).every((filter) => {
     const value = row[filter.column]
@@ -61,6 +80,7 @@ function matchesFilters(row: Record<string, unknown>, query: TableDataQuery): bo
 }
 
 export class RedisDriver implements DbDriver {
+  readonly capabilities = capabilitiesForType('redis')
   private clients = new Map<number, RedisClient>()
 
   constructor(
@@ -234,7 +254,7 @@ export class RedisDriver implements DbDriver {
 
   private async keyRows(database: string | undefined, key: string, type: string): Promise<Record<string, unknown>[]> {
     const client = await this.clientFor(database)
-    if (type === 'string') return [{ value: await client.get(key) }]
+    if (type === 'string') return [{ __key__: key, value: await client.get(key) }]
     if (type === 'hash') {
       const values = await client.hGetAll(key)
       return Object.entries(values).map(([field, value]) => ({ field, value }))
@@ -273,12 +293,149 @@ export class RedisDriver implements DbDriver {
     const total = rows.length
     rows = rows.slice((query.page - 1) * query.pageSize, query.page * query.pageSize)
     return {
-      columns: this.columnsForType(type),
+      columns: type === 'string'
+        ? [{ name: '__key__', dataType: 'key', nullable: false, isPrimaryKey: true, defaultValue: null, ordinal: 0 },
+          { name: 'value', dataType: 'string', nullable: false, isPrimaryKey: false, defaultValue: null, ordinal: 1 }]
+        : this.columnsForType(type),
       rows,
       total,
-      editable: false,
-      keyColumns: []
+      editable: true,
+      keyColumns: type === 'string' ? ['__key__']
+        : type === 'hash' ? ['field']
+          : type === 'list' ? ['index']
+            : type === 'set' || type === 'zset' ? ['member']
+              : type === 'stream' ? ['id'] : [],
+      recordOperations: type === 'stream'
+        ? { insert: true, update: false, delete: true }
+        : { insert: true, update: true, delete: true }
     }
+  }
+
+  private inferRedisType(values: Record<string, unknown>): string {
+    if (Object.hasOwn(values, 'field')) return 'hash'
+    if (Object.hasOwn(values, 'score')) return 'zset'
+    if (Object.hasOwn(values, 'member')) return 'set'
+    if (Object.hasOwn(values, 'id')) return 'stream'
+    return 'string'
+  }
+
+  private mutationCommands(type: string, key: string, operation: Extract<DatabaseOperation, { kind: 'records.mutate' }>): string[][] {
+    const commands: string[][] = []
+    for (const mutation of operation.mutations) {
+      if (type === 'string') {
+        if (mutation.kind === 'delete') commands.push(['DEL', key])
+        else commands.push(['SET', key, redisScalar(mutation.kind === 'insert' ? mutation.values.value : mutation.changes.value)])
+        continue
+      }
+      if (type === 'hash') {
+        if (mutation.kind === 'insert') commands.push(['HSET', key, redisScalar(mutation.values.field), redisScalar(mutation.values.value)])
+        else if (mutation.kind === 'delete') commands.push(['HDEL', key, redisScalar(mutation.key.field)])
+        else {
+          const oldField = redisScalar(mutation.key.field)
+          const field = redisScalar(mutation.changes.field ?? oldField)
+          const value = redisScalar(mutation.changes.value)
+          if (field !== oldField) commands.push(['HDEL', key, oldField])
+          commands.push(['HSET', key, field, value])
+        }
+        continue
+      }
+      if (type === 'list') {
+        if (mutation.kind === 'insert') commands.push(['RPUSH', key, redisScalar(mutation.values.value)])
+        else if (mutation.kind === 'update') commands.push(['LSET', key, redisScalar(mutation.key.index), redisScalar(mutation.changes.value)])
+        else {
+          const marker = `__safe_db_delete__:${crypto.randomUUID()}`
+          commands.push(['EVAL', "redis.call('LSET', KEYS[1], ARGV[1], ARGV[2]); return redis.call('LREM', KEYS[1], 1, ARGV[2])", '1', key, redisScalar(mutation.key.index), marker])
+        }
+        continue
+      }
+      if (type === 'set') {
+        if (mutation.kind === 'insert') commands.push(['SADD', key, redisScalar(mutation.values.member)])
+        else if (mutation.kind === 'delete') commands.push(['SREM', key, redisScalar(mutation.key.member)])
+        else {
+          const oldMember = redisScalar(mutation.key.member)
+          const member = redisScalar(mutation.changes.member ?? oldMember)
+          if (member !== oldMember) commands.push(['SREM', key, oldMember], ['SADD', key, member])
+        }
+        continue
+      }
+      if (type === 'zset') {
+        if (mutation.kind === 'delete') commands.push(['ZREM', key, redisScalar(mutation.key.member)])
+        else {
+          const previous = mutation.kind === 'update' ? redisScalar(mutation.key.member) : ''
+          const member = redisScalar(mutation.kind === 'insert' ? mutation.values.member : mutation.changes.member ?? previous)
+          const score = redisScalar(mutation.kind === 'insert' ? mutation.values.score : mutation.changes.score)
+          if (!Number.isFinite(Number(score))) throw new Error('Redis ZSet score 必须是数字')
+          if (previous && previous !== member) commands.push(['ZREM', key, previous])
+          commands.push(['ZADD', key, score, member])
+        }
+        continue
+      }
+      if (type === 'stream') {
+        if (mutation.kind === 'update') throw new Error('Redis Stream 记录不可原地修改，请新增记录后删除旧记录')
+        if (mutation.kind === 'delete') commands.push(['XDEL', key, redisScalar(mutation.key.id)])
+        else commands.push(['XADD', key, redisScalar(mutation.values.id ?? '*'), ...streamFields(mutation.values.value)])
+        continue
+      }
+      throw new Error(`不支持编辑 Redis ${type} 类型`)
+    }
+    return commands
+  }
+
+  async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const database = 'target' in operation
+      ? operation.target.database
+      : 'source' in operation ? operation.source.database
+        : operation.database
+    const client = await this.clientFor(database)
+    if (operation.kind === 'records.mutate') {
+      if (operation.target.kind !== 'key') throw new Error('Redis 结构化操作目标必须是 Key')
+      let type = await client.type(operation.target.name)
+      if (type === 'none') {
+        const first = operation.mutations[0]
+        if (first.kind !== 'insert') throw new Error('Redis Key 不存在，只能通过新增记录创建')
+        type = this.inferRedisType(first.values)
+      }
+      const commands = this.mutationCommands(type, operation.target.name, operation)
+      const transaction = client.multi()
+      for (const command of commands) transaction.sendCommand(command)
+      await transaction.exec()
+      return {
+        results: [{ kind: 'exec', affectedRows: operation.mutations.length }],
+        atomicity: commands.length === 1 ? 'single-request' : 'best-effort',
+        succeeded: operation.mutations.length, failed: 0
+      }
+    }
+    if (operation.kind === 'records.clear') {
+      throw new Error('Redis 不存在可保留结构的空 Key；请删除 Key 或逐条删除成员')
+    }
+    if (operation.kind === 'object.drop') {
+      const target = operation.target
+      if (target.kind !== 'key') throw new Error('Redis 删除目标必须是 Key')
+      const deleted = await client.del(target.name)
+      return { results: [{ kind: 'exec', affectedRows: deleted }], atomicity: 'single-request', succeeded: deleted, failed: 0 }
+    }
+    if (operation.kind === 'object.create') {
+      if (operation.objectType !== 'key') throw new Error('Redis 只能创建 Key')
+      const type = String(operation.definition.type ?? 'string').toLocaleLowerCase()
+      const target = { kind: 'records.mutate' as const, target: { kind: 'key' as const, name: operation.name, database }, mutations: [] as Extract<DatabaseOperation, { kind: 'records.mutate' }>['mutations'] }
+      if (type === 'string') target.mutations.push({ kind: 'insert', values: { value: operation.definition.value ?? '' } })
+      else if (type === 'hash') target.mutations.push({ kind: 'insert', values: { field: operation.definition.field ?? 'field', value: operation.definition.value ?? '' } })
+      else if (type === 'list') target.mutations.push({ kind: 'insert', values: { value: operation.definition.value ?? '' } })
+      else if (type === 'set') target.mutations.push({ kind: 'insert', values: { member: operation.definition.member ?? 'member' } })
+      else if (type === 'zset') target.mutations.push({ kind: 'insert', values: { member: operation.definition.member ?? 'member', score: operation.definition.score ?? 0 } })
+      else if (type === 'stream') target.mutations.push({ kind: 'insert', values: { id: '*', value: operation.definition.value ?? { value: '' } } })
+      else throw new Error(`不支持创建 Redis ${type} 类型`)
+      return this.executeOperation(target)
+    }
+    if (operation.kind === 'object.copy') {
+      if (operation.source.kind !== 'key') throw new Error('Redis 只能复制 Key')
+      const dump = await client.DUMP(operation.source.name)
+      if (dump === null) throw new Error('Redis Key 不存在')
+      const ttl = await client.pTTL(operation.source.name)
+      await client.RESTORE(operation.targetName, ttl > 0 ? ttl : 0, dump)
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'best-effort', succeeded: 1, failed: 0 }
+    }
+    throw new Error(`Redis 尚未接入结构化操作：${operation.kind}`)
   }
 
   private validateCommand(command: RedisCommandInput): void {

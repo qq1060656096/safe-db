@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
-import type { AgentApprovalRequest, ConnectionConfig, ConnectionMeta, ExecuteResponse, PermissionMode, SavedQuery, SavedQueryInput, SqlKind, TableDataQuery, TableDataResult } from '../../../shared/types'
+import type { AgentApprovalRequest, ConnectionConfig, ConnectionMeta, DatabaseOperation, DriverCapabilities, ExecuteResponse, PermissionMode, SavedQuery, SavedQueryInput, SqlKind, TableDataQuery, TableDataResult } from '../../../shared/types'
 import { i18n } from '../i18n'
 import { invalidateConnectionMetadata } from '../metadataCache'
 
-export type ObjectGroup = 'tables' | 'views' | 'routines' | 'queries'
+export type ObjectGroup = 'tables' | 'views' | 'routines' | 'collections' | 'keys' | 'queries'
 export type TabType = 'query' | 'table' | 'structure' | 'objects' | 'audit'
 
 export interface ObjectSelection {
@@ -29,7 +29,7 @@ export interface AppTab {
   definitionEditor?: boolean
   /** 查看定义时为只读，不能修改或执行 SQL。 */
   definitionReadOnly?: boolean
-  definitionKind?: 'view' | 'function' | 'procedure'
+  definitionKind?: 'view' | 'function' | 'procedure' | 'collection' | 'key'
   definitionReplaceMode?: 'replace' | 'drop-create'
   objectGroup?: ObjectGroup
   objectSelection?: ObjectSelection
@@ -58,6 +58,7 @@ export const useAppStore = defineStore('app', {
     connectedIds: {} as Record<string, boolean>,
     tabs: [] as AppTab[],
     savedQueries: [] as SavedQuery[],
+    driverCapabilities: {} as Record<string, DriverCapabilities>,
     activeTabId: null as string | null,
     pendingApproval: null as PendingApproval | null
   }),
@@ -104,6 +105,14 @@ export const useAppStore = defineStore('app', {
       for (const id of Object.keys(this.connectedIds)) {
         if (!connectionIds.has(id)) delete this.connectedIds[id]
       }
+      for (const id of Object.keys(this.driverCapabilities)) {
+        if (!connectionIds.has(id)) delete this.driverCapabilities[id]
+      }
+      const capabilities = await Promise.all(this.connections.map(async (connection) => {
+        try { return [connection.id, await window.api.getDriverCapabilities(connection.id)] as const }
+        catch { return null }
+      }))
+      for (const item of capabilities) if (item) this.driverCapabilities[item[0]] = item[1]
     },
     async loadSavedQueries(): Promise<void> {
       this.savedQueries = await window.api.listSavedQueries()
@@ -150,6 +159,7 @@ export const useAppStore = defineStore('app', {
       delete this.connectedIds[id]
       this.savedQueries = this.savedQueries.filter((query) => query.connectionId !== id)
       this.connections = this.connections.filter((connection) => connection.id !== id)
+      delete this.driverCapabilities[id]
       invalidateConnectionMetadata(id)
     },
     setConnected(id: string, connected: boolean): void {
@@ -266,6 +276,24 @@ export const useAppStore = defineStore('app', {
           sqlKind: response.sqlKind ?? 'WRITE',
           connectionName,
           database
+        }
+      })
+    },
+    async executeOperationWithApproval(connectionId: string, operation: DatabaseOperation): Promise<ExecuteResponse> {
+      // 去除 Vue Proxy，主进程还会执行独立的运行时校验。
+      const payload = JSON.parse(JSON.stringify(operation)) as DatabaseOperation
+      const response = await window.api.executeOperation(connectionId, payload)
+      if (response.status !== 'needsApproval') return response
+      const connectionName = this.connections.find((connection) => connection.id === connectionId)?.name ?? ''
+      return new Promise<ExecuteResponse>((resolve) => {
+        approvalResolver = resolve
+        this.pendingApproval = {
+          token: response.approvalToken!, connectionId,
+          sql: response.preview ?? JSON.stringify(payload, null, 2),
+          sqlKind: response.sqlKind ?? 'WRITE', connectionName,
+          database: 'target' in payload
+            ? payload.target.database
+            : 'source' in payload ? payload.source.database : payload.database
         }
       })
     },

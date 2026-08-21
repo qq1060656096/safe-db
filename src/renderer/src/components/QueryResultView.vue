@@ -4,6 +4,7 @@ import { ColumnWidthOutlined, CopyOutlined, DownloadOutlined } from '@vicons/ant
 import { NButton, NDataTable, NDropdown, NIcon, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { DbType, QueryResult } from '../../../shared/types'
+import { useContextMenuDismiss } from '../contextMenu'
 import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, queryColumnLayoutScope, useLayoutStore } from '../stores/layout'
 import { toCsv, toJson } from '../utils'
 
@@ -32,6 +33,10 @@ const columnMenuTarget = ref<{ column: string; kind: 'header' | 'cell'; value?: 
 const selectedColumns = ref<string[]>([])
 const lastSelectedColumnIndex = ref<number | null>(null)
 const tableRoot = ref<HTMLElement | null>(null)
+useContextMenuDismiss(() => {
+  rowMenuShow.value = false
+  columnMenuShow.value = false
+})
 const selectedColumnSet = new Set<string>()
 const rows = computed(() => (props.result.rows ?? []).map((row, index) => ({ ...row, __resultKey: index })))
 const columnNames = computed(() => (props.result.columns ?? []).map((column) => column.name))
@@ -96,7 +101,7 @@ const copyOptions = computed<DropdownOption[]>(() => {
     { key: 'values', label: t('query.copyColumnValues') },
     { key: 'headers', label: t('query.copyColumnNames') }
   ]
-  const native = props.dbType === 'mongodb' || props.dbType === 'redis'
+  const native = props.dbType === 'mongodb' || props.dbType === 'redis' || props.dbType === 'qdrant'
   const copyAsOptions: DropdownOption[] = [
     ...(native ? [] : [
       { key: 'select', label: 'SELECT', disabled: !sqlTarget.value },

@@ -11,6 +11,14 @@ export interface RedisCommandInput {
   args: string[]
 }
 
+export interface QdrantRequestInput {
+  raw: string
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  path: string
+  query?: Record<string, string | number | boolean>
+  body?: unknown
+}
+
 /** 收集 SQL 正文中的 @name 引用，忽略 @@系统变量、字符串、标识符和注释。 */
 function referencedMysqlUserVariables(input: string): Set<string> {
   const names = new Set<string>()
@@ -225,6 +233,72 @@ export function parseRedisCommands(input: string): RedisCommandInput[] {
   return commands
 }
 
+/**
+ * Qdrant 查询编辑器只接受同一连接内的相对 REST 请求。禁止完整 URL、查询串和
+ * 自定义 Header，避免把已保存的 API Key 发送到非 Qdrant 目标。
+ */
+export function parseQdrantRequests(input: string): QdrantRequestInput[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(input)
+  } catch (error) {
+    throw new Error(`Qdrant 请求必须是 JSON：${error instanceof Error ? error.message : String(error)}`)
+  }
+  const values = Array.isArray(parsed) ? parsed : [parsed]
+  if (!values.length) throw new Error('Qdrant 请求不能为空')
+  const requests = values.map((value): QdrantRequestInput => {
+    const request = recordValue(value)
+    if (!request) throw new Error('Qdrant 请求必须是 JSON 对象')
+    const rawMethod = typeof request.method === 'string' ? request.method.toUpperCase() : ''
+    if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(rawMethod)) {
+      throw new Error('Qdrant 请求 method 必须是 GET、POST、PUT、PATCH 或 DELETE')
+    }
+    const path = typeof request.path === 'string' ? request.path.trim() : ''
+    if (!path.startsWith('/') || path.startsWith('//') || path.includes('?') || path.includes('#') || path.includes('\\')) {
+      throw new Error('Qdrant 请求 path 必须是不含查询串的相对 API 路径')
+    }
+    const normalizedPath = path.replace(/\/+$/, '') || '/'
+    for (const segment of normalizedPath === '/' ? [] : normalizedPath.split('/').slice(1)) {
+      let decoded: string
+      try { decoded = decodeURIComponent(segment) }
+      catch { throw new Error('Qdrant 请求 path 包含无效的 URL 编码') }
+      if (!decoded || decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\') || /[\u0000-\u001f]/.test(decoded)) {
+        throw new Error('Qdrant 请求 path 包含不安全的路径片段')
+      }
+    }
+    if (Object.keys(request).some((key) => !['method', 'path', 'query', 'body'].includes(key))) {
+      throw new Error('Qdrant 请求只允许 method、path、query 和 body 字段')
+    }
+    let query: QdrantRequestInput['query']
+    if (Object.hasOwn(request, 'query')) {
+      const source = recordValue(request.query)
+      if (!source) throw new Error('Qdrant 请求 query 必须是 JSON 对象')
+      const allowed = new Set(['wait', 'ordering', 'timeout', 'consistency'])
+      query = {}
+      for (const [key, value] of Object.entries(source)) {
+        if (!allowed.has(key)) throw new Error(`Qdrant 请求 query 参数未开放：${key}`)
+        if (typeof value !== 'string' && typeof value !== 'boolean' && (typeof value !== 'number' || !Number.isFinite(value))) {
+          throw new Error(`Qdrant 请求 query 参数必须是字符串、数字或布尔值：${key}`)
+        }
+        query[key] = value
+      }
+    }
+    const normalized = {
+      method: rawMethod as QdrantRequestInput['method'],
+      path: normalizedPath,
+      ...(query && Object.keys(query).length ? { query } : {}),
+      ...(Object.hasOwn(request, 'body') ? { body: request.body } : {})
+    }
+    if (normalized.method === 'GET' && normalized.body !== undefined) throw new Error('Qdrant GET 请求不允许 body')
+    return { raw: JSON.stringify(normalized), ...normalized }
+  })
+  const kinds = requests.map(classifyQdrantRequest)
+  if (requests.length > 1 && kinds.some((kind) => kind !== 'READ')) {
+    throw new Error('Qdrant 变更请求每次只能执行一条，多个 REST 请求无法保证整体回滚')
+  }
+  return requests
+}
+
 const MONGO_READ = new Set([
   'aggregate', 'buildinfo', 'collstats', 'count', 'dbstats', 'distinct', 'explain', 'find',
   'getmore', 'hello', 'listcollections', 'listdatabases', 'listindexes', 'ping', 'serverstatus'
@@ -268,6 +342,44 @@ export function classifyRedisCommand(args: string[]): SqlKind {
   return 'WRITE'
 }
 
+const QDRANT_COLLECTION = '[^/]+'
+const QDRANT_READ_ROUTES: Array<[QdrantRequestInput['method'], RegExp]> = [
+  ['GET', /^\/$/],
+  ['GET', /^\/collections$/],
+  ['GET', new RegExp(`^/collections/${QDRANT_COLLECTION}(?:/exists|/aliases|/optimizations)?$`)],
+  ['GET', /^\/aliases$/],
+  ['GET', new RegExp(`^/collections/${QDRANT_COLLECTION}/points/${QDRANT_COLLECTION}$`)],
+  ['POST', new RegExp(`^/collections/${QDRANT_COLLECTION}/points$`)],
+  ['POST', new RegExp(`^/collections/${QDRANT_COLLECTION}/points/(?:scroll|count|query|query/batch|query/groups|search/matrix/pairs|search/matrix/offsets)$`)],
+  ['POST', new RegExp(`^/collections/${QDRANT_COLLECTION}/facet$`)]
+]
+const QDRANT_WRITE_ROUTES: Array<[QdrantRequestInput['method'], RegExp]> = [
+  ['PUT', new RegExp(`^/collections/${QDRANT_COLLECTION}/points$`)],
+  ['POST', new RegExp(`^/collections/${QDRANT_COLLECTION}/points/(?:delete|vectors/delete|payload|payload/delete|payload/clear|batch)$`)],
+  ['PUT', new RegExp(`^/collections/${QDRANT_COLLECTION}/points/(?:vectors|payload)$`)]
+]
+const QDRANT_DDL_ROUTES: Array<[QdrantRequestInput['method'], RegExp]> = [
+  ['PUT', new RegExp(`^/collections/${QDRANT_COLLECTION}$`)],
+  ['PATCH', new RegExp(`^/collections/${QDRANT_COLLECTION}$`)],
+  ['DELETE', new RegExp(`^/collections/${QDRANT_COLLECTION}$`)],
+  ['PUT', new RegExp(`^/collections/${QDRANT_COLLECTION}/index$`)],
+  ['DELETE', new RegExp(`^/collections/${QDRANT_COLLECTION}/index/${QDRANT_COLLECTION}$`)],
+  ['PUT', new RegExp(`^/collections/${QDRANT_COLLECTION}/vectors/${QDRANT_COLLECTION}$`)],
+  ['DELETE', new RegExp(`^/collections/${QDRANT_COLLECTION}/vectors/${QDRANT_COLLECTION}$`)],
+  ['POST', /^\/collections\/aliases$/]
+]
+
+function matchesQdrantRoute(request: QdrantRequestInput, routes: Array<[QdrantRequestInput['method'], RegExp]>): boolean {
+  return routes.some(([method, pattern]) => method === request.method && pattern.test(request.path))
+}
+
+export function classifyQdrantRequest(request: QdrantRequestInput): SqlKind {
+  if (matchesQdrantRoute(request, QDRANT_READ_ROUTES)) return 'READ'
+  if (matchesQdrantRoute(request, QDRANT_WRITE_ROUTES)) return 'WRITE'
+  if (matchesQdrantRoute(request, QDRANT_DDL_ROUTES)) return 'DDL'
+  throw new Error(`Qdrant API 路径未开放：${request.method} ${request.path}`)
+}
+
 const SEVERITY: Record<SqlKind, number> = { READ: 0, OTHER: 1, WRITE: 2, DDL: 3 }
 
 function combine(statements: ClassifiedSql['statements']): ClassifiedSql {
@@ -283,6 +395,9 @@ export function classifyDatabaseInput(type: DbType, input: string): ClassifiedSq
   }
   if (type === 'redis') {
     return combine(parseRedisCommands(input).map((item) => ({ sql: item.raw, kind: classifyRedisCommand(item.args) })))
+  }
+  if (type === 'qdrant') {
+    return combine(parseQdrantRequests(input).map((item) => ({ sql: item.raw, kind: classifyQdrantRequest(item) })))
   }
   if (type === 'mysql') return classifySql(normalizeMysqlSessionVariables(input))
   return classifySql(input)

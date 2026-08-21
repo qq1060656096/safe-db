@@ -6,6 +6,7 @@ import Database from 'better-sqlite3'
 import type {
   AuditFilter,
   ConnectionConfig,
+  DatabaseOperation,
   ExportOptions,
   SavedQueryInput,
   TableDataQuery
@@ -372,9 +373,15 @@ export function registerIpcHandlers(
     (await drivers.get(id)).getTableData(q)
   )
 
+  ipcMain.handle('db:capabilities', (_e, id: string) => drivers.capabilities(id))
+
   // ---- SQL 执行(权限管道)----
   ipcMain.handle('exec:sql', (_e, id: string, sql: string, database?: string) =>
     executor.execute(id, sql, database)
+  )
+
+  ipcMain.handle('exec:operation', (_e, id: string, operation: DatabaseOperation) =>
+    executor.executeOperation(id, operation)
   )
 
   ipcMain.handle('exec:cancel', (_e, id: string) => drivers.cancel(id))

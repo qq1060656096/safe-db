@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UndoOutlined, UnlockOutlined } from '@vicons/antd'
-import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NModal, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { ConnectionMeta, DbType, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import type { ConnectionMeta, DatabaseOperation, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import { useContextMenuDismiss } from '../contextMenu'
 import { isAppLocale, localeOptions } from '../i18n'
 import { invalidateConnectionMetadata, loadColumnMetadata, loadDatabaseMetadata, loadTableMetadata } from '../metadataCache'
 import { loadObjectDefinition, openObjectDefinitionTab, type ObjectDefinitionTarget } from '../objectDefinition'
@@ -18,7 +19,7 @@ type NodeData =
   | { kind: 'connection'; connectionId: string }
   | { kind: 'database'; connectionId: string; database: string }
   | { kind: 'schema'; connectionId: string; database?: string; schema: string }
-  | { kind: 'objectGroup'; connectionId: string; database: string; schema?: string; group: 'tables' | 'views' | 'routines'; count: number }
+  | { kind: 'objectGroup'; connectionId: string; database?: string; schema?: string; group: 'tables' | 'views' | 'routines' | 'collections' | 'keys'; count: number }
   | { kind: 'savedQueryGroup'; connectionId: string; database?: string; count: number }
   | { kind: 'savedQuery'; query: SavedQuery }
   | { kind: 'table'; connectionId: string; database?: string; schema?: string; table: string; tableType: 'table' | 'view'; comment?: string }
@@ -51,6 +52,30 @@ const copySource = ref<Extract<NodeData, { kind: 'table' }> | null>(null)
 const copyTargetName = ref('')
 const copyWithData = ref(true)
 const copyingTable = ref(false)
+const createDatabaseModalOpen = ref(false)
+const createDatabaseConnectionId = ref<string | null>(null)
+const createDatabaseName = ref('')
+const creatingDatabase = ref(false)
+const createCollectionModalOpen = ref(false)
+const createCollectionConnectionId = ref<string | null>(null)
+const createCollectionDatabase = ref<string | undefined>()
+const createCollectionName = ref('')
+const createCollectionVectorSize = ref(1536)
+const createCollectionDistance = ref<'Cosine' | 'Euclid' | 'Dot' | 'Manhattan'>('Cosine')
+const creatingCollection = ref(false)
+const createKeyModalOpen = ref(false)
+const createKeyConnectionId = ref<string | null>(null)
+const createKeyDatabase = ref<string | undefined>()
+const createKeyName = ref('')
+const createKeyType = ref<'string' | 'hash' | 'list' | 'set' | 'zset' | 'stream'>('string')
+const createKeyValue = ref('')
+const creatingKey = ref(false)
+const redisTypeOptions = ['string', 'hash', 'list', 'set', 'zset', 'stream'].map((value) => ({ label: value, value }))
+const createCollectionIsPoint = computed(() => {
+  const id = createCollectionConnectionId.value
+  return id ? store.driverCapabilities[id]?.recordModel === 'point' : false
+})
+const qdrantDistanceOptions = ['Cosine', 'Euclid', 'Dot', 'Manhattan'].map((value) => ({ label: value, value }))
 let definitionRequest = 0
 
 const permissionType: Record<PermissionMode, 'info' | 'warning' | 'success'> = { readonly: 'info', approval: 'warning', full: 'success' }
@@ -86,19 +111,6 @@ const connectionTransferOptions = computed<DropdownOption[]>(() => [
 function connectionKey(id: string): string { return `conn:${id}` }
 function databaseKey(id: string, database: string): string { return `db:${id}:${database}` }
 function savedQueryGroupKey(id: string, database?: string): string { return `query-group:${id}:${database ?? ''}` }
-function sqlLiteral(value: string): string { return `'${value.replace(/'/g, "''")}'` }
-function quoteIdentifier(type: DbType | undefined, name: string): string {
-  if (type === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
-  if (type === 'sqlserver') return '[' + name.replace(/]/g, ']]') + ']'
-  return '"' + name.replace(/"/g, '""') + '"'
-}
-function isRelational(type: DbType | undefined): boolean { return type !== 'mongodb' && type !== 'redis' }
-function qualifiedTable(type: DbType | undefined, database: string | undefined, schema: string | undefined, table: string): string {
-  if (type === 'postgres') return `${quoteIdentifier(type, schema ?? 'public')}.${quoteIdentifier(type, table)}`
-  if (type === 'sqlserver') return `${quoteIdentifier(type, schema ?? 'dbo')}.${quoteIdentifier(type, table)}`
-  if (type === 'mysql' && database) return `${quoteIdentifier(type, database)}.${quoteIdentifier(type, table)}`
-  return quoteIdentifier(type, table)
-}
 function connectionNode(connection: ConnectionMeta): DbTreeNode {
   return { key: connectionKey(connection.id), isLeaf: false, label: connection.name, children: withSavedQueryGroup([], connection.id), data: { kind: 'connection', connectionId: connection.id } }
 }
@@ -113,7 +125,7 @@ function rebuildRoots(): void {
   })
   renderedConnections = new Map(store.connections.map((connection) => [connection.id, connection]))
 }
-watch(() => store.connections, rebuildRoots, { immediate: true })
+watch(() => store.connections.slice(), rebuildRoots, { immediate: true })
 
 function setNodeChildren(key: TreeKey, children: DbTreeNode[] | undefined): void {
   const walk = (nodes: DbTreeNode[]): DbTreeNode[] => nodes.map((node) => {
@@ -165,6 +177,9 @@ function updateExpandedKeys(keys: TreeKey[]): void {
   }
 }
 function connectionOf(id: string): ConnectionMeta | undefined { return store.connections.find((connection) => connection.id === id) }
+function capabilitiesOf(connection: ConnectionMeta | undefined) {
+  return connection ? store.driverCapabilities[connection.id] : undefined
+}
 function connectionActivityOf(id: string): ConnectionActivity | undefined { return connectionActivities.value[id] }
 function setConnectionActivity(id: string, activity?: ConnectionActivity): void {
   const next = { ...connectionActivities.value }
@@ -185,6 +200,10 @@ async function loadConnectionChildren(connectionId: string, force = false): Prom
     }
     store.setConnected(connectionId, true)
   }
+  if (capabilitiesOf(connection)?.recordModel === 'point') {
+    const collections = await loadTableMetadata(connectionId)
+    return withSavedQueryGroup(objectGroups(connection, undefined, undefined, collections, []), connectionId)
+  }
   const databases = await loadDatabaseMetadata(connectionId)
   const visibleDatabases = connection.type === 'sqlite' ? databases.filter((name) => name === 'main') : databases
   const databaseNodes: DbTreeNode[] = visibleDatabases.map((database) => ({
@@ -193,7 +212,7 @@ async function loadConnectionChildren(connectionId: string, force = false): Prom
   }))
   return withSavedQueryGroup(databaseNodes, connectionId)
 }
-function tableNode(connectionId: string, database: string, table: TableInfo): DbTreeNode {
+function tableNode(connectionId: string, database: string | undefined, table: TableInfo): DbTreeNode {
   return {
     key: `table:${connectionId}:${database}:${table.schema ?? ''}:${table.name}`, isLeaf: true, label: table.name,
     data: { kind: 'table', connectionId, database, schema: table.schema, table: table.name, tableType: table.type, comment: table.comment }
@@ -212,12 +231,12 @@ function routineNode(connectionId: string, database: string, routine: RoutineInf
 }
 function objectGroups(
   connection: ConnectionMeta,
-  database: string,
+  database: string | undefined,
   schema: string | undefined,
   tables: TableInfo[],
   routines: RoutineInfo[]
 ): DbTreeNode[] {
-  const makeGroup = (group: 'tables' | 'views' | 'routines', children: DbTreeNode[]): DbTreeNode => ({
+  const makeGroup = (group: 'tables' | 'views' | 'routines' | 'collections' | 'keys', children: DbTreeNode[]): DbTreeNode => ({
     key: `group:${connection.id}:${database}:${schema ?? ''}:${group}`,
     isLeaf: children.length === 0,
     label: group,
@@ -226,38 +245,17 @@ function objectGroups(
   })
   const tableNodes = tables.filter((table) => table.type === 'table').map((table) => tableNode(connection.id, database, table))
   const viewNodes = tables.filter((table) => table.type === 'view').map((table) => tableNode(connection.id, database, table))
+  const capabilities = capabilitiesOf(connection)
+  if (capabilities?.objectKinds.includes('collection') && !capabilities.objectKinds.includes('table')) return [makeGroup('collections', tableNodes)]
+  if (capabilities?.objectKinds.includes('key')) return [makeGroup('keys', tableNodes)]
   const groups = [makeGroup('tables', tableNodes), makeGroup('views', viewNodes)]
-  if (connection.type === 'mysql' || connection.type === 'postgres' || connection.type === 'sqlserver') groups.push(makeGroup('routines', routines.map((routine) => routineNode(connection.id, database, routine))))
+  if (!database) return groups
+  if (capabilities?.objectKinds.includes('routine')) groups.push(makeGroup('routines', routines.map((routine) => routineNode(connection.id, database, routine))))
   return groups
 }
 async function listRoutines(connection: ConnectionMeta, database: string): Promise<RoutineInfo[]> {
-  if (connection.type === 'sqlite' || connection.type === 'mongodb' || connection.type === 'redis') return []
-  if (typeof window.api.listRoutines === 'function') {
-    try {
-      return await window.api.listRoutines(connection.id, database)
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      if (!/No handler registered for ['"]?db:routines/.test(detail)) throw error
-    }
-  }
-  if (connection.type === 'sqlserver') return []
-  const sql = connection.type === 'mysql'
-    ? `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ${sqlLiteral(database)} ORDER BY ROUTINE_TYPE, ROUTINE_NAME`
-    : `SELECT n.nspname AS schema, p.proname AS name, p.prokind AS kind, pg_get_function_identity_arguments(p.oid) AS arguments
-       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prokind IN ('f', 'p')
-       ORDER BY n.nspname, p.prokind, p.proname, arguments`
-  const response = await window.api.executeSql(connection.id, sql, database)
-  if (response.status !== 'ok') throw new Error(response.error ?? t('sidebar.routinesLoadFailed'))
-  const rows = response.results?.find((result) => result.kind === 'rows')?.rows ?? []
-  return rows.map((row) => ({
-    name: String(row.name),
-    type: connection.type === 'mysql'
-      ? (row.type === 'PROCEDURE' ? 'procedure' : 'function')
-      : (row.kind === 'p' ? 'procedure' : 'function'),
-    schema: row.schema ? String(row.schema) : undefined,
-    arguments: row.arguments ? String(row.arguments) : undefined
-  }))
+  if (!capabilitiesOf(connection)?.objectKinds.includes('routine')) return []
+  return window.api.listRoutines(connection.id, database)
 }
 async function loadDatabaseChildren(connectionId: string, database: string): Promise<DbTreeNode[]> {
   const connection = connectionOf(connectionId)
@@ -311,7 +309,10 @@ async function openConnection(connectionId: string, force = false): Promise<void
   }
 }
 async function refreshTables(connectionId: string, database?: string): Promise<void> {
-  if (database === undefined) return
+  if (database === undefined) {
+    if (capabilitiesOf(connectionOf(connectionId))?.recordModel === 'point') await openConnection(connectionId, true)
+    return
+  }
   invalidateConnectionMetadata(connectionId)
   await loadDatabaseMetadata(connectionId).catch(() => [])
   setNodeChildren(databaseKey(connectionId, database), await loadDatabaseChildren(connectionId, database))
@@ -420,13 +421,6 @@ function parseImportRows(name: string, content: string): Record<string, unknown>
     .sort((left, right) => right.count - left.count)[0].value
   return importRowsFromCsv(content, delimiter)
 }
-function sqlValue(value: unknown): string {
-  if (value === null || value === undefined) return 'NULL'
-  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL'
-  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
-  const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
-  return `'${text.replace(/'/g, "''")}'`
-}
 async function importTableData(connection: ConnectionMeta, node: Extract<NodeData, { kind: 'table' }>): Promise<void> {
   try {
     const file = await window.api.pickDataFile()
@@ -434,42 +428,59 @@ async function importTableData(connection: ConnectionMeta, node: Extract<NodeDat
     const rows = parseImportRows(file.name, file.content)
     if (!rows.length) throw new Error(t('sidebar.importNoRows'))
     if (rows.length > 50000) throw new Error(t('sidebar.importTooManyRows'))
-    const columns = await loadColumnMetadata(connection.id, node.database, node.table, node.schema)
-    const knownColumns = new Map(columns.map((column) => [column.name.toLocaleLowerCase(), column.name]))
-    const sourceColumns = new Set(rows.flatMap((row) => Object.keys(row).map((key) => key.toLocaleLowerCase())))
-    const matchedColumns = [...knownColumns].filter(([lowerName]) => sourceColumns.has(lowerName)).map(([, name]) => name)
-    if (!matchedColumns.length) throw new Error(t('sidebar.importNoMatchingColumns'))
-    const target = qualifiedTable(connection.type, node.database, node.schema, node.table)
-    const groupedRows = new Map<string, { columns: string[]; values: unknown[][] }>()
-    for (const row of rows) {
-      const rowValues = new Map(Object.entries(row).map(([key, value]) => [key.toLocaleLowerCase(), value]))
-      const presentColumns = matchedColumns.filter((column) => rowValues.has(column.toLocaleLowerCase()))
-      if (!presentColumns.length) continue
-      const key = presentColumns.join('\u0000')
-      const group = groupedRows.get(key) ?? { columns: presentColumns, values: [] }
-      group.values.push(presentColumns.map((column) => rowValues.get(column.toLocaleLowerCase())))
-      groupedRows.set(key, group)
-    }
-    const statements: string[] = []
-    let importCount = 0
-    for (const group of groupedRows.values()) {
-      importCount += group.values.length
-      for (let offset = 0; offset < group.values.length; offset += 500) {
-        const batch = group.values.slice(offset, offset + 500)
-        statements.push(`INSERT INTO ${target} (${group.columns.map((column) => quoteIdentifier(connection.type, column)).join(', ')}) VALUES\n${batch.map((values) => `(${values.map(sqlValue).join(', ')})`).join(',\n')};`)
+    const capabilities = capabilitiesOf(connection)
+    if (capabilities?.structuredOperations && capabilities.records.bulkImport.supported) {
+      const targetKind = capabilities.recordTargetKind
+      let values: Record<string, unknown>[]
+      if (capabilities.recordModel === 'point') {
+        values = rows.map((row) => {
+          const normalized = { ...row }
+          if (typeof normalized.payload === 'string') {
+            try { normalized.payload = JSON.parse(normalized.payload) }
+            catch { throw new Error(t('grid.pointPayloadInvalid')) }
+          }
+          if (typeof normalized.vector === 'string') {
+            try { normalized.vector = JSON.parse(normalized.vector) }
+            catch { throw new Error(t('grid.pointVectorInvalid')) }
+          }
+          return normalized
+        })
+        if (values.some((row) => row.id === undefined || row.vector === undefined)) {
+          throw new Error(t('sidebar.qdrantImportRequiresPoint'))
+        }
+      } else if (capabilities.recordModel === 'document') {
+        values = rows
+      } else {
+        const columns = await loadColumnMetadata(connection.id, node.database, node.table, node.schema)
+        const knownColumns = new Map(columns.map((column) => [column.name.toLocaleLowerCase(), column.name]))
+        values = rows.map((row) => Object.fromEntries(Object.entries(row)
+          .map(([name, value]) => [knownColumns.get(name.toLocaleLowerCase()), value] as const)
+          .filter((entry): entry is [string, unknown] => Boolean(entry[0]))))
+        if (values.every((row) => Object.keys(row).length === 0)) throw new Error(t('sidebar.importNoMatchingColumns'))
       }
-    }
-    dialog.warning({
-      title: t('sidebar.importDataTitle', { name: node.table }),
-      content: t('sidebar.importDataHint', { file: file.name, count: importCount, columns: matchedColumns.join(', ') }),
-      positiveText: t('sidebar.importDataConfirm'), negativeText: t('common.cancel'),
-      onPositiveClick: async () => {
-        const result = await store.executeWithApproval(connection.id, statements.join('\n'), node.database)
-        if (result.status === 'ok') message.success(t('sidebar.importedData', { count: importCount, name: node.table }))
-        else if (result.status === 'denied') message.warning(result.error ?? '')
-        else if (result.status === 'error') message.error(result.error ?? '')
+      const operation: DatabaseOperation = {
+        kind: 'records.mutate',
+        target: { kind: targetKind, name: node.table, database: node.database, schema: node.schema },
+        mutations: values.filter((row) => Object.keys(row).length).map((row) => ({ kind: 'insert', values: row }))
       }
-    })
+      const importCount = operation.mutations.length
+      const importedColumns = [...new Set(values.flatMap((row) => Object.keys(row)))].join(', ')
+      dialog.warning({
+        title: t('sidebar.importDataTitle', { name: node.table }),
+        content: t('sidebar.importDataHint', { file: file.name, count: importCount, columns: importedColumns }),
+        positiveText: t('sidebar.importDataConfirm'), negativeText: t('common.cancel'),
+        onPositiveClick: async () => {
+          const result = await store.executeOperationWithApproval(connection.id, operation)
+          if (result.status === 'ok') message.success(t('sidebar.importedData', { count: importCount, name: node.table }))
+          else if (result.status === 'denied') message.warning(result.error ?? '')
+          else if (result.status === 'error') message.error(result.error ?? '')
+        }
+      })
+      return
+    }
+    throw new Error(capabilities?.records.bulkImport.supported === false
+      ? capabilities.records.bulkImport.reason
+      : t('grid.structuredOperationUnavailable'))
   } catch (error) {
     message.error(t('sidebar.importDataFailed', { error: error instanceof Error ? error.message : String(error) }))
   }
@@ -478,11 +489,33 @@ async function exportTableData(connection: ConnectionMeta, node: Extract<NodeDat
   try {
     const first = await store.getTableData(connection.id, { database: node.database, schema: node.schema, table: node.table, page: 1, pageSize: 1 })
     const cap = 50000
-    const result = first.total > 1
-      ? await store.getTableData(connection.id, { database: node.database, schema: node.schema, table: node.table, page: 1, pageSize: Math.min(first.total, cap) })
-      : first
-    const rows = result.rows.map((row) => Object.fromEntries(result.columns.map((column) => [column.name, row[column.name]])))
-    const content = format === 'csv' ? toCsv(result.columns.map((column) => column.name), rows) : toJson(rows)
+    let columns = first.columns
+    let sourceRows = first.rows
+    if (first.paginationMode === 'cursor') {
+      sourceRows = []
+      let cursor: string | number | undefined
+      const seen = new Set<string>()
+      while (sourceRows.length < cap) {
+        const pageResult = await store.getTableData(connection.id, {
+          database: node.database, schema: node.schema, table: node.table, page: 1,
+          pageSize: Math.min(500, cap - sourceRows.length), cursor,
+          includeVectors: capabilitiesOf(connection)?.recordModel === 'point'
+        })
+        columns = pageResult.columns
+        sourceRows.push(...pageResult.rows)
+        if (pageResult.nextCursor === undefined) break
+        const key = JSON.stringify(pageResult.nextCursor)
+        if (seen.has(key)) break
+        seen.add(key)
+        cursor = pageResult.nextCursor
+      }
+    } else if (first.total > 1) {
+      const result = await store.getTableData(connection.id, { database: node.database, schema: node.schema, table: node.table, page: 1, pageSize: Math.min(first.total, cap) })
+      columns = result.columns
+      sourceRows = result.rows
+    }
+    const rows = sourceRows.map((row) => Object.fromEntries(columns.map((column) => [column.name, row[column.name]])))
+    const content = format === 'csv' ? toCsv(columns.map((column) => column.name), rows) : toJson(rows)
     const path = await window.api.exportData({
       defaultName: `${node.table}.${format}`, content,
       fileTypes: [format === 'csv' ? { name: 'CSV', extensions: ['csv'] } : { name: 'JSON', extensions: ['json'] }]
@@ -511,32 +544,17 @@ async function confirmCopyTable(): Promise<void> {
   if (!connection) return
   copyingTable.value = true
   try {
-    const sourceSql = qualifiedTable(connection.type, source.database, source.schema, source.table)
-    const targetSql = qualifiedTable(connection.type, source.database, source.schema, targetName)
-    let createSql: string
-    if (connection.type === 'mysql') createSql = `CREATE TABLE ${targetSql} LIKE ${sourceSql};`
-    else if (connection.type === 'postgres') createSql = `CREATE TABLE ${targetSql} (LIKE ${sourceSql} INCLUDING ALL);`
-    else if (connection.type === 'sqlserver') {
-      createSql = `SELECT ${copyWithData.value ? '*' : 'TOP (0) *'} INTO ${targetSql} FROM ${sourceSql};`
-      const result = await store.executeWithApproval(connection.id, createSql, source.database)
-      if (result.status === 'ok') {
-        message.success(t('sidebar.tableCopied', { source: source.table, target: targetName }))
-        copyModalOpen.value = false
-        copySource.value = null
-        await refreshTables(connection.id, source.database)
-      } else if (result.status === 'denied') message.warning(result.error ?? '')
-      else if (result.status === 'error') message.error(result.error ?? '')
-      return
-    }
-    else {
-      const ddl = await window.api.getObjectDdl(connection.id, source.database, source.table, source.schema)
-      const prefix = /^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)/i
-      if (!prefix.test(ddl)) throw new Error(t('sidebar.copyTableDdlUnsupported'))
-      createSql = ddl.replace(prefix, `$1${targetSql}`)
-    }
-    const insertPrefix = connection.type === 'postgres' ? `INSERT INTO ${targetSql} OVERRIDING SYSTEM VALUE` : `INSERT INTO ${targetSql}`
-    const sql = `${createSql.replace(/;?\s*$/, ';')}${copyWithData.value ? `\n${insertPrefix} SELECT * FROM ${sourceSql};` : ''}`
-    const result = await store.executeWithApproval(connection.id, sql, source.database)
+    const capabilities = capabilitiesOf(connection)
+    if (!capabilities?.structuredOperations || !capabilities.objects.copy.supported) throw new Error('当前驱动不支持结构化复制')
+    const result = await store.executeOperationWithApproval(connection.id, {
+      kind: 'object.copy',
+      source: {
+        kind: capabilities.recordTargetKind, name: source.table,
+        database: source.database, schema: source.schema
+      },
+      targetName,
+      withData: copyWithData.value
+    })
     if (result.status === 'ok') {
       message.success(t('sidebar.tableCopied', { source: source.table, target: targetName }))
       copyModalOpen.value = false
@@ -551,7 +569,12 @@ async function confirmCopyTable(): Promise<void> {
   }
 }
 async function runTableAction(connection: ConnectionMeta, node: Extract<NodeData, { kind: 'table' }>, action: string): Promise<void> {
-  const name = qualifiedTable(connection.type, node.database, node.schema, node.table)
+  const capabilities = capabilitiesOf(connection)
+  if (!capabilities) return
+  const target = {
+    kind: capabilities.recordTargetKind,
+    name: node.table, database: node.database, schema: node.schema
+  }
   if (action === 'copy') {
     await navigator.clipboard.writeText(node.table)
     message.success(t('sidebar.copiedTableName', { name: node.table }))
@@ -561,22 +584,24 @@ async function runTableAction(connection: ConnectionMeta, node: Extract<NodeData
   if (action === 'import-data') { await importTableData(connection, node); return }
   if (action === 'export-csv' || action === 'export-json') { await exportTableData(connection, node, action === 'export-csv' ? 'csv' : 'json'); return }
   if (action === 'truncate') {
-    const sql = connection.type === 'sqlite' ? `DELETE FROM ${name};` : `TRUNCATE TABLE ${name};`
+    const operation: DatabaseOperation = { kind: 'records.clear', target }
+    const preview = JSON.stringify(operation, null, 2)
     dialog.warning({
-      title: t('sidebar.truncateTitle', { name: node.table }), content: t('sidebar.truncateHint', { sql }), positiveText: t('sidebar.truncateOk'), negativeText: t('common.cancel'),
+      title: t('sidebar.truncateTitle', { name: node.table }), content: t('sidebar.truncateHint', { sql: preview }), positiveText: t('sidebar.truncateOk'), negativeText: t('common.cancel'),
       onPositiveClick: async () => {
-        const result = await store.executeWithApproval(connection.id, sql, node.database)
+        const result = await store.executeOperationWithApproval(connection.id, operation)
         if (result.status === 'ok') message.success(t('sidebar.truncated', { name: node.table }))
         else if (result.status === 'denied') message.warning(result.error ?? '')
         else if (result.status === 'error') message.error(result.error ?? '')
       }
     })
   } else if (action === 'drop') {
-    const sql = `DROP TABLE ${name};`
+    const operation: DatabaseOperation = { kind: 'object.drop', target }
+    const preview = JSON.stringify(operation, null, 2)
     dialog.error({
-      title: t('sidebar.dropTitle', { name: node.table }), content: t('sidebar.dropHint', { sql }), positiveText: t('common.delete'), negativeText: t('common.cancel'),
+      title: t('sidebar.dropTitle', { name: node.table }), content: t('sidebar.dropHint', { sql: preview }), positiveText: t('common.delete'), negativeText: t('common.cancel'),
       onPositiveClick: async () => {
-        const result = await store.executeWithApproval(connection.id, sql, node.database)
+        const result = await store.executeOperationWithApproval(connection.id, operation)
         if (result.status === 'ok') { message.success(t('sidebar.dropped', { name: node.table })); await refreshTables(connection.id, node.database) }
         else if (result.status === 'denied') message.warning(result.error ?? '')
         else if (result.status === 'error') message.error(result.error ?? '')
@@ -587,8 +612,15 @@ async function runTableAction(connection: ConnectionMeta, node: Extract<NodeData
 async function onConnectionAction(connection: ConnectionMeta, action: string): Promise<void> {
   if (action === 'connect') await openConnection(connection.id)
   else if (action === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: connection.name }), connectionId: connection.id })
+  else if (action === 'newCollection') openCreateCollection(connection)
+  else if (action === 'newKey') openCreateKey(connection, connection.database)
+  else if (action === 'newDatabase') openCreateDatabase(connection)
   else if (action === 'refresh') await openConnection(connection.id, true)
   else if (action === 'edit') { editing.value = connection; dialogOpen.value = true }
+  else if (action === 'copy-name') {
+    await navigator.clipboard.writeText(connection.name)
+    message.success(t('sidebar.copiedObjectName', { name: connection.name }))
+  }
   else if (action === 'duplicate') {
     if (duplicatingConnectionId.value) return
     duplicatingConnectionId.value = connection.id
@@ -617,11 +649,29 @@ async function onConnectionAction(connection: ConnectionMeta, action: string): P
 function connectionOptions(connection: ConnectionMeta): DropdownOption[] {
   const connected = Boolean(store.connectedIds[connection.id])
   const busy = Boolean(connectionActivityOf(connection.id))
+  const capabilities = capabilitiesOf(connection)
   return [
     { key: 'connect', label: t('sidebar.connect'), disabled: connected || busy, icon: () => h(NIcon, null, { default: () => h(DatabaseOutlined) }) },
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
+    ...(capabilities?.objectKinds.includes('collection') && capabilities.objects.create.supported ? [{
+      key: 'newCollection',
+      label: t('sidebar.newCollection'),
+      disabled: busy || connection.permissionMode === 'readonly',
+      icon: () => h(NIcon, null, { default: () => h(TableOutlined) })
+    }] : []),
+    ...(capabilities?.objectKinds.includes('key') && capabilities.objects.create.supported ? [{
+      key: 'newKey', label: t('sidebar.newKey'), disabled: busy || connection.permissionMode === 'readonly',
+      icon: () => h(NIcon, null, { default: () => h(PlusOutlined) })
+    }] : []),
+    ...(capabilities?.databases.create.supported ? [{
+      key: 'newDatabase',
+      label: t('sidebar.newDatabase'),
+      disabled: busy || connection.permissionMode === 'readonly',
+      icon: () => h(NIcon, null, { default: () => h(AppstoreOutlined) })
+    }] : []),
     { key: 'refresh', label: t('common.refresh'), disabled: !connected || busy, icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'edit', label: t('sidebar.editConnection'), disabled: busy, icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
+    { key: 'copy-name', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
     { key: 'duplicate', label: t('sidebar.copyConnection'), disabled: duplicatingConnectionId.value !== null, icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
     { key: 'disconnect', label: t('sidebar.disconnect'), disabled: !connected || busy, icon: () => h(NIcon, null, { default: () => h(DisconnectOutlined) }) },
     { type: 'divider', key: 'divider' },
@@ -629,6 +679,7 @@ function connectionOptions(connection: ConnectionMeta): DropdownOption[] {
   ]
 }
 function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta): DropdownOption[] {
+  const capabilities = capabilitiesOf(connection)
   const common: DropdownOption[] = [
     { key: 'open', label: t('sidebar.openTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) },
     { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) },
@@ -641,11 +692,33 @@ function tableOptions(tableType: 'table' | 'view', connection?: ConnectionMeta):
     { key: 'edit-definition', label: t('objectList.editViewDefinition'), disabled: connection?.permissionMode === 'readonly', icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
     ...common.slice(1)
   ]
-  if (!isRelational(connection?.type)) return [
-    common[0], ...common.slice(1),
+  if (capabilities && capabilities.recordModel !== 'row') return [
+    common[0],
+    ...(['point', 'document'].includes(capabilities?.recordModel ?? '') && (capabilities?.indexes.create.supported || capabilities?.indexes.drop.supported)
+      ? [{ key: 'design', label: t('qdrant.manageIndexes'), icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) }]
+      : []),
+    ...(capabilities?.definition.read.supported ? [{ key: 'view-definition', label: t('objectList.viewDefinition'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) }] : []),
+    ...common.slice(1),
+    ...(capabilities.objects.copy.supported ? [{
+      key: 'duplicate', label: t('sidebar.copyTable'), disabled: connection?.permissionMode === 'readonly',
+      icon: () => h(NIcon, null, { default: () => h(CopyOutlined) })
+    }] : []),
+    ...(capabilities?.objectKinds.includes('collection') && capabilities.objects.create.supported ? [{
+      key: 'newCollection',
+      label: t('sidebar.newCollection'),
+      disabled: connection?.permissionMode === 'readonly',
+      icon: () => h(NIcon, null, { default: () => h(TableOutlined) })
+    }] : []),
+    ...(capabilities?.records.bulkImport.supported ? [
+      { type: 'divider' as const, key: 'data-divider' },
+      { key: 'import-data', label: t('sidebar.importData'), icon: () => h(NIcon, null, { default: () => h(ImportOutlined) }) }
+    ] : []),
     { key: 'export-data', label: t('sidebar.exportData'), icon: () => h(NIcon, null, { default: () => h(ExportOutlined) }), children: [
       { key: 'export-csv', label: t('sidebar.exportCsv') }, { key: 'export-json', label: t('sidebar.exportJson') }
-    ] }
+    ] },
+    ...(capabilities?.records.clear.supported || capabilities?.objects.drop.supported ? [{ type: 'divider' as const, key: 'destructive-divider' }] : []),
+    ...(capabilities?.records.clear.supported ? [{ key: 'truncate', label: t(capabilities.recordModel === 'point' ? 'sidebar.clearCollection' : 'sidebar.truncateTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(ClearOutlined) }) }] : []),
+    ...(capabilities?.objects.drop.supported ? [{ key: 'drop', label: t(capabilities.recordModel === 'point' ? 'sidebar.dropCollection' : 'sidebar.dropTable'), icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }] : [])
   ]
   return [
     common[0],
@@ -686,6 +759,17 @@ function routineOptions(node: Extract<NodeData, { kind: 'routine' }>, connection
 }
 function definitionTargetOf(node: Extract<NodeData, { kind: 'table' | 'routine' }>): ObjectDefinitionTarget | null {
   if (node.kind === 'table') {
+    const connection = connectionOf(node.connectionId)
+    const capabilities = capabilitiesOf(connection)
+    if (capabilities && capabilities.recordModel !== 'row') {
+      return {
+        connectionId: node.connectionId,
+        database: node.database,
+        schema: node.schema,
+        name: node.table,
+        kind: capabilities.recordTargetKind === 'key' ? 'key' : 'collection'
+      }
+    }
     if (node.tableType !== 'view' || !node.database) return null
     return {
       connectionId: node.connectionId,
@@ -705,6 +789,8 @@ function definitionTargetOf(node: Extract<NodeData, { kind: 'table' | 'routine' 
   }
 }
 function definitionTabTitle(target: ObjectDefinitionTarget, readOnly: boolean): string {
+  if (target.kind === 'collection') return t('objectList.collectionDefinitionTitle', { name: target.name })
+  if (target.kind === 'key') return t('objectList.keyDefinitionTitle', { name: target.name })
   if (readOnly) {
     const key = target.kind === 'view'
       ? 'objectList.viewDefinitionTitle'
@@ -764,6 +850,8 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
   if (node.data.kind === 'database') {
     if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: node.data.database }), connectionId: node.data.connectionId, database: node.data.database })
     else if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database })
+    else if (key === 'newCollection') { const connection = connectionOf(node.data.connectionId); if (connection) openCreateCollection(connection, node.data.database) }
+    else if (key === 'newKey') { const connection = connectionOf(node.data.connectionId); if (connection) openCreateKey(connection, node.data.database) }
     else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
     return
   }
@@ -773,7 +861,21 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
     return
   }
   if (node.data.kind === 'objectGroup') {
-    if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
+    if (key === 'query') {
+      const connection = connectionOf(node.data.connectionId)
+      store.openTab({
+        type: 'query',
+        title: t('sidebar.queryTitle', { name: connection?.name ?? objectGroupLabel(node.data.group) }),
+        connectionId: node.data.connectionId,
+        database: node.data.database
+      })
+    } else if (key === 'newCollection') {
+      const connection = connectionOf(node.data.connectionId)
+      if (connection) openCreateCollection(connection, node.data.database)
+    } else if (key === 'newKey') {
+      const connection = connectionOf(node.data.connectionId)
+      if (connection) openCreateKey(connection, node.data.database)
+    } else if (key === 'newTable') store.openTab({ type: 'structure', title: t('sidebar.newTable'), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
     else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
     return
   }
@@ -783,6 +885,7 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
     else if (key === 'view-definition') void openDefinition(node.data, true)
     else if (key === 'edit-definition') void openDefinition(node.data, false)
     else if (key === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: node.data.table }), connectionId: node.data.connectionId, database: node.data.database, schema: node.data.schema })
+    else if (key === 'newCollection') { const connection = connectionOf(node.data.connectionId); if (connection) openCreateCollection(connection, node.data.database) }
     else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
     else { const connection = connectionOf(node.data.connectionId); if (connection) void runTableAction(connection, node.data, key) }
     return
@@ -811,17 +914,35 @@ function nodeOptions(node: DbTreeNode): DropdownOption[] {
     return [
       { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
       { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
-      ...(isRelational(connection?.type) ? [{ key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : [])
+      ...(capabilitiesOf(connection)?.objectKinds.includes('table') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : []),
+      ...(capabilitiesOf(connection)?.objectKinds.includes('collection') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newCollection', label: t('sidebar.newCollection'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : []),
+      ...(capabilitiesOf(connection)?.objectKinds.includes('key') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newKey', label: t('sidebar.newKey'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) }] : [])
     ]
   }
   if (node.data.kind === 'schema') return [
     { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
     { key: 'newTable', label: t('sidebar.newTable') }
   ]
-  if (node.data.kind === 'objectGroup') return [
-    { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
-    ...(node.data.group === 'tables' && isRelational(connectionOf(node.data.connectionId)?.type) ? [{ key: 'newTable', label: t('sidebar.newTable') }] : [])
-  ]
+  if (node.data.kind === 'objectGroup') {
+    const connection = connectionOf(node.data.connectionId)
+    return [
+      ...(node.data.group === 'collections' && capabilitiesOf(connection)?.objectKinds.includes('collection')
+        ? [
+            { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
+            {
+              key: 'newCollection', label: t('sidebar.newCollection'),
+              disabled: connection?.permissionMode === 'readonly',
+              icon: () => h(NIcon, null, { default: () => h(TableOutlined) })
+            }
+          ]
+        : []),
+      ...(node.data.group === 'keys' && capabilitiesOf(connection)?.objectKinds.includes('key')
+        ? [{ key: 'newKey', label: t('sidebar.newKey'), disabled: connection?.permissionMode === 'readonly', icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) }]
+        : []),
+      { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
+      ...(node.data.group === 'tables' && capabilitiesOf(connection)?.objectKinds.includes('table') ? [{ key: 'newTable', label: t('sidebar.newTable') }] : [])
+    ]
+  }
   if (node.data.kind === 'routine') return routineOptions(node.data, connectionOf(node.data.connectionId))
   return tableOptions(node.data.tableType, connectionOf(node.data.connectionId))
 }
@@ -947,7 +1068,7 @@ function renderPrefix({ option }: { option: TreeOption }): ReturnType<typeof h> 
   else if (node.data.kind === 'savedQuery') component = CodeOutlined
   else if (node.data.kind === 'database') component = AppstoreOutlined
   else if (node.data.kind === 'schema') component = FolderOutlined
-  else if (node.data.kind === 'objectGroup') component = node.data.group === 'tables' ? TableOutlined : node.data.group === 'views' ? EyeOutlined : FunctionOutlined
+  else if (node.data.kind === 'objectGroup') component = node.data.group === 'tables' || node.data.group === 'collections' ? TableOutlined : node.data.group === 'views' ? EyeOutlined : FunctionOutlined
   else if (node.data.kind === 'routine') component = FunctionOutlined
   else component = node.data.tableType === 'view' ? EyeOutlined : TableOutlined
   return h(NIcon, { color }, { default: () => h(component) })
@@ -998,6 +1119,139 @@ onBeforeUnmount(() => { if (searchMetadataTimer) clearTimeout(searchMetadataTime
 function collapseAll(): void { expandedKeys.value = [] }
 function openNewConnection(): void { editing.value = null; dialogOpen.value = true }
 function closeDialog(): void { dialogOpen.value = false; editing.value = null }
+function openCreateDatabase(connection: ConnectionMeta): void {
+  if (!capabilitiesOf(connection)?.databases.create.supported || connection.permissionMode === 'readonly') return
+  createDatabaseConnectionId.value = connection.id
+  createDatabaseName.value = ''
+  createDatabaseModalOpen.value = true
+}
+function closeCreateDatabase(): void {
+  if (creatingDatabase.value) return
+  createDatabaseModalOpen.value = false
+  createDatabaseConnectionId.value = null
+  createDatabaseName.value = ''
+}
+function openCreateCollection(connection: ConnectionMeta, database?: string): void {
+  const capabilities = capabilitiesOf(connection)
+  if (!capabilities?.objectKinds.includes('collection') || !capabilities.objects.create.supported || connection.permissionMode === 'readonly') return
+  createCollectionConnectionId.value = connection.id
+  createCollectionDatabase.value = database ?? connection.database
+  createCollectionName.value = ''
+  createCollectionVectorSize.value = 1536
+  createCollectionDistance.value = 'Cosine'
+  createCollectionModalOpen.value = true
+}
+function closeCreateCollection(): void {
+  if (creatingCollection.value) return
+  createCollectionModalOpen.value = false
+  createCollectionConnectionId.value = null
+  createCollectionDatabase.value = undefined
+  createCollectionName.value = ''
+}
+function openCreateKey(connection: ConnectionMeta, database?: string): void {
+  const capabilities = capabilitiesOf(connection)
+  if (!capabilities?.objectKinds.includes('key') || !capabilities.objects.create.supported || connection.permissionMode === 'readonly') return
+  createKeyConnectionId.value = connection.id
+  createKeyDatabase.value = database ?? connection.database
+  createKeyName.value = ''
+  createKeyType.value = 'string'
+  createKeyValue.value = ''
+  createKeyModalOpen.value = true
+}
+function closeCreateKey(): void {
+  if (creatingKey.value) return
+  createKeyModalOpen.value = false
+  createKeyConnectionId.value = null
+  createKeyDatabase.value = undefined
+  createKeyName.value = ''
+}
+async function confirmCreateKey(): Promise<void> {
+  const connection = createKeyConnectionId.value ? connectionOf(createKeyConnectionId.value) : undefined
+  const database = createKeyDatabase.value
+  const name = createKeyName.value.trim()
+  if (!connection || !name) { message.warning(t('sidebar.keyNameRequired')); return }
+  creatingKey.value = true
+  try {
+    const definition: Record<string, unknown> = { type: createKeyType.value }
+    if (createKeyType.value === 'hash') Object.assign(definition, { field: 'field', value: createKeyValue.value })
+    else if (createKeyType.value === 'set') Object.assign(definition, { member: createKeyValue.value || 'member' })
+    else if (createKeyType.value === 'zset') Object.assign(definition, { member: createKeyValue.value || 'member', score: 0 })
+    else if (createKeyType.value === 'stream') Object.assign(definition, { value: { value: createKeyValue.value } })
+    else Object.assign(definition, { value: createKeyValue.value })
+    const result = await store.executeOperationWithApproval(connection.id, {
+      kind: 'object.create', objectType: 'key', name, database, definition
+    })
+    if (result.status === 'ok') {
+      message.success(t('sidebar.keyCreated', { name }))
+      createKeyModalOpen.value = false
+      createKeyConnectionId.value = null
+      createKeyDatabase.value = undefined
+      createKeyName.value = ''
+      await refreshTables(connection.id, database)
+    } else if (result.status === 'denied') message.warning(result.error ?? '')
+    else if (result.status === 'error') message.error(result.error ?? '')
+  } finally { creatingKey.value = false }
+}
+async function confirmCreateCollection(): Promise<void> {
+  const connection = createCollectionConnectionId.value ? connectionOf(createCollectionConnectionId.value) : undefined
+  const database = createCollectionDatabase.value
+  const name = createCollectionName.value.trim()
+  if (!connection) return
+  const capabilities = capabilitiesOf(connection)
+  if (!capabilities?.objectKinds.includes('collection') || !capabilities.objects.create.supported) return
+  if (!name) { message.warning(t('sidebar.collectionNameRequired')); return }
+  if (capabilities.recordModel === 'point' && (!Number.isInteger(createCollectionVectorSize.value) || createCollectionVectorSize.value < 1)) {
+    message.warning(t('sidebar.collectionVectorSizeRequired'))
+    return
+  }
+  creatingCollection.value = true
+  try {
+    const result = await store.executeOperationWithApproval(connection.id, {
+      kind: 'object.create', objectType: 'collection', name, database,
+      definition: capabilities.recordModel === 'point'
+        ? { vectors: { size: createCollectionVectorSize.value, distance: createCollectionDistance.value } }
+        : {}
+    })
+    if (result.status === 'ok') {
+      message.success(t('sidebar.collectionCreated', { name }))
+      createCollectionModalOpen.value = false
+      createCollectionConnectionId.value = null
+      createCollectionDatabase.value = undefined
+      createCollectionName.value = ''
+      if (database === undefined) await openConnection(connection.id, true)
+      else await refreshTables(connection.id, database)
+    } else if (result.status === 'denied') message.warning(result.error ?? '')
+    else if (result.status === 'error') message.error(t('sidebar.createCollectionFailed', { error: result.error ?? '' }))
+  } catch (error) {
+    message.error(t('sidebar.createCollectionFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    creatingCollection.value = false
+  }
+}
+async function confirmCreateDatabase(): Promise<void> {
+  const connection = createDatabaseConnectionId.value ? connectionOf(createDatabaseConnectionId.value) : undefined
+  const name = createDatabaseName.value.trim()
+  if (!connection || !capabilitiesOf(connection)?.databases.create.supported) return
+  if (!name) { message.warning(t('sidebar.databaseNameRequired')); return }
+  creatingDatabase.value = true
+  try {
+    const result = await store.executeOperationWithApproval(connection.id, {
+      kind: 'object.create', objectType: 'database', name, definition: {}
+    })
+    if (result.status === 'ok') {
+      message.success(t('sidebar.databaseCreated', { name }))
+      createDatabaseModalOpen.value = false
+      createDatabaseConnectionId.value = null
+      createDatabaseName.value = ''
+      await openConnection(connection.id, true)
+    } else if (result.status === 'denied') message.warning(result.error ?? '')
+    else if (result.status === 'error') message.error(t('sidebar.createDatabaseFailed', { error: result.error ?? '' }))
+  } catch (error) {
+    message.error(t('sidebar.createDatabaseFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    creatingDatabase.value = false
+  }
+}
 function openNewQuery(connectionId: string | number): void {
   const connection = connectionOf(String(connectionId))
   if (connection) store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: connection.name }), connectionId: connection.id })
@@ -1042,6 +1296,7 @@ async function transferConnections(action: string | number): Promise<void> {
   }
 }
 const contextMenuOptions = computed(() => contextMenuNode.value ? nodeOptions(contextMenuNode.value) : [])
+useContextMenuDismiss(() => { contextMenuShow.value = false })
 function selectContextMenu(key: string | number): void {
   if (contextMenuNode.value) onNodeAction(contextMenuNode.value, key)
   contextMenuShow.value = false
@@ -1062,9 +1317,45 @@ function selectContextMenu(key: string | number): void {
       <NInput v-model:value="search" clearable size="small" :placeholder="t('sidebar.searchPlaceholder')"><template #prefix><NIcon color="#aaa"><SearchOutlined /></NIcon></template></NInput>
       <NButton quaternary size="small" :title="t('sidebar.collapseAll')" :aria-label="t('sidebar.collapseAll')" @click="collapseAll"><template #icon><NIcon><MenuFoldOutlined /></NIcon></template></NButton>
     </div>
-    <div class="sidebar-tree"><NTree remote virtual-scroll block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" :node-props="treeNodeProps" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
+    <div class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" :node-props="treeNodeProps" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
     <NDropdown trigger="manual" placement="bottom-start" :show="contextMenuShow" :x="contextMenuX" :y="contextMenuY" :options="contextMenuOptions" @select="selectContextMenu" @clickoutside="contextMenuShow = false" />
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
+    <NModal :show="createDatabaseModalOpen" :mask-closable="!creatingDatabase" @update:show="(show) => { if (!show) closeCreateDatabase() }">
+      <NCard class="copy-table-modal" :title="t('sidebar.newDatabase')" closable @close="closeCreateDatabase">
+        <NFormItem :label="t('sidebar.databaseName')" required>
+          <NInput v-model:value="createDatabaseName" autofocus :disabled="creatingDatabase" :placeholder="t('sidebar.databaseNamePlaceholder')" @keyup.enter="confirmCreateDatabase" />
+        </NFormItem>
+        <template #footer>
+          <div class="modal-actions"><NButton :disabled="creatingDatabase" @click="closeCreateDatabase">{{ t('common.cancel') }}</NButton><NButton type="primary" :loading="creatingDatabase" @click="confirmCreateDatabase">{{ t('sidebar.createDatabase') }}</NButton></div>
+        </template>
+      </NCard>
+    </NModal>
+    <NModal :show="createCollectionModalOpen" :mask-closable="!creatingCollection" @update:show="(show) => { if (!show) closeCreateCollection() }">
+      <NCard class="copy-table-modal" :title="t('sidebar.newCollection')" closable @close="closeCreateCollection">
+        <NFormItem :label="t('sidebar.collectionName')" required>
+          <NInput v-model:value="createCollectionName" autofocus :disabled="creatingCollection" :placeholder="t('sidebar.collectionNamePlaceholder')" />
+        </NFormItem>
+        <NFormItem v-if="createCollectionIsPoint" :label="t('sidebar.collectionVectorSize')" required>
+          <NInputNumber v-model:value="createCollectionVectorSize" :min="1" :max="65536" :disabled="creatingCollection" />
+        </NFormItem>
+        <NFormItem v-if="createCollectionIsPoint" :label="t('sidebar.collectionDistance')" required>
+          <NSelect v-model:value="createCollectionDistance" :options="qdrantDistanceOptions" :disabled="creatingCollection" />
+        </NFormItem>
+        <template #footer>
+          <div class="modal-actions"><NButton :disabled="creatingCollection" @click="closeCreateCollection">{{ t('common.cancel') }}</NButton><NButton type="primary" :loading="creatingCollection" @click="confirmCreateCollection">{{ t('sidebar.createCollection') }}</NButton></div>
+        </template>
+      </NCard>
+    </NModal>
+    <NModal :show="createKeyModalOpen" :mask-closable="!creatingKey" @update:show="(show) => { if (!show) closeCreateKey() }">
+      <NCard class="copy-table-modal" :title="t('sidebar.newKey')" closable @close="closeCreateKey">
+        <NFormItem :label="t('sidebar.keyName')" required><NInput v-model:value="createKeyName" autofocus :disabled="creatingKey" /></NFormItem>
+        <NFormItem :label="t('sidebar.keyType')" required><NSelect v-model:value="createKeyType" :options="redisTypeOptions" :disabled="creatingKey" /></NFormItem>
+        <NFormItem :label="t('sidebar.initialValue')"><NInput v-model:value="createKeyValue" :disabled="creatingKey" /></NFormItem>
+        <template #footer>
+          <div class="modal-actions"><NButton :disabled="creatingKey" @click="closeCreateKey">{{ t('common.cancel') }}</NButton><NButton type="primary" :loading="creatingKey" @click="confirmCreateKey">{{ t('sidebar.createKey') }}</NButton></div>
+        </template>
+      </NCard>
+    </NModal>
     <NModal :show="copyModalOpen" :mask-closable="!copyingTable" @update:show="(show) => { if (!show) closeCopyTable() }">
       <NCard class="copy-table-modal" :title="t('sidebar.copyTableTitle', { name: copySource?.table ?? '' })" closable @close="closeCopyTable">
         <NFormItem :label="t('sidebar.copyTableTarget')" required>

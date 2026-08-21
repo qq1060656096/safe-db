@@ -116,7 +116,7 @@ export class AgentService {
       status: 'ok',
       data: {
         protocolVersion: '1',
-        databases: ['mysql', 'postgres', 'sqlite', 'sqlserver', 'mongodb', 'redis'],
+        databases: ['mysql', 'postgres', 'sqlite', 'sqlserver', 'mongodb', 'redis', 'qdrant'],
         methods: [
           'connection.list',
           'database.list',
@@ -315,6 +315,8 @@ export class AgentService {
               ? ['MongoDB 字段结构由最多 100 条文档推断']
               : connection.type === 'redis'
                 ? ['Redis key 根据数据类型映射为只读表格']
+                : connection.type === 'qdrant'
+                  ? ['Qdrant collection 映射为只读 Point 表格；payload 字段由索引和样本推断，向量默认不返回']
                 : []
         })
       } catch (error) {

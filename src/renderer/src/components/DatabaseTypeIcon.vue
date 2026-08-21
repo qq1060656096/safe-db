@@ -4,6 +4,7 @@ import mongodbIcon from 'simple-icons/icons/mongodb.svg'
 import mysqlIcon from 'simple-icons/icons/mysql.svg'
 import postgresqlIcon from 'simple-icons/icons/postgresql.svg'
 import redisIcon from 'simple-icons/icons/redis.svg'
+import qdrantIcon from '../assets/qdrant.svg'
 import sqliteIcon from 'simple-icons/icons/sqlite.svg'
 import sqlServerIcon from 'simple-icons/icons/microsoftsqlserver.svg'
 import type { DbType } from '../../../shared/types'
@@ -25,7 +26,8 @@ const appearances: Record<DbType, { title: string; icon: string; color: string }
   sqlite: { title: 'SQLite', icon: sqliteIcon, color: '#58c9c4' },
   sqlserver: { title: 'SQL Server', icon: sqlServerIcon, color: '#f2a000' },
   mongodb: { title: 'MongoDB', icon: mongodbIcon, color: '#bd5900' },
-  redis: { title: 'Redis', icon: redisIcon, color: '#fa7076' }
+  redis: { title: 'Redis', icon: redisIcon, color: '#fa7076' },
+  qdrant: { title: 'Qdrant', icon: qdrantIcon, color: '#dc244c' }
 }
 
 const appearance = computed(() => appearances[props.type])

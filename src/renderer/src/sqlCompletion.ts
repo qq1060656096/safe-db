@@ -247,7 +247,8 @@ const functionsByDialect: Record<DbType, FunctionSpec[]> = {
     { label: 'JSON_VALUE', signature: 'JSON_VALUE(expression, path)', snippet: 'JSON_VALUE(${expression}, ${path})' }
   ],
   mongodb: [],
-  redis: []
+  redis: [],
+  qdrant: []
 }
 
 function dialectFor(type?: DbType): SQLDialect {
@@ -556,7 +557,7 @@ function redisCompletionSource(catalog: SqlCompletionCatalog): CompletionSource 
 }
 
 export function sqlCompletionExtension(catalog: SqlCompletionCatalog): Extension {
-  if (catalog.dbType === 'mongodb') return []
+  if (catalog.dbType === 'mongodb' || catalog.dbType === 'qdrant') return []
   if (catalog.dbType === 'redis') return autocompletion({ override: [redisCompletionSource(catalog)] })
   const dialect = dialectFor(catalog.dbType)
   const schema = buildSchema(catalog)

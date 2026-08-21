@@ -14,6 +14,8 @@ import QueryEditor from '../components/QueryEditor.vue'
 import RightPanel from '../components/RightPanel.vue'
 import Sidebar from '../components/Sidebar.vue'
 import StructureDesigner from '../components/StructureDesigner.vue'
+import CollectionDesigner from '../components/CollectionDesigner.vue'
+import { useContextMenuDismiss } from '../contextMenu'
 import { useAppStore } from '../stores/app'
 import { defaultWorkspaceLayout, useLayoutStore } from '../stores/layout'
 import { invalidateConnectionMetadata } from '../metadataCache'
@@ -33,6 +35,7 @@ const tabMenuShow = ref(false)
 const tabMenuX = ref(0)
 const tabMenuY = ref(0)
 const tabMenuId = ref<string | null>(null)
+useContextMenuDismiss(() => { tabMenuShow.value = false })
 interface QueryEditorHandle { saveForClose(): Promise<boolean> }
 const queryEditorRefs = new Map<string, QueryEditorHandle>()
 const pendingCloseIds = ref<string[]>([])
@@ -53,6 +56,9 @@ let stopWindowModeListener: (() => void) | null = null
 let windowModeInitialized = false
 const hasApi = computed(() => typeof window.api !== 'undefined')
 const activeTitle = computed(() => store.tabs.find((tab) => tab.id === store.activeTabId)?.title ?? t('app.name'))
+function recordModelOf(connectionId?: string) {
+  return connectionId ? store.driverCapabilities[connectionId]?.recordModel : undefined
+}
 const displayedPanelWidths = computed(() => {
   let left = leftCollapsed.value ? 0 : Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, leftWidth.value))
   let right = rightCollapsed.value ? 0 : Math.min(MAX_RIGHT_WIDTH, Math.max(MIN_RIGHT_WIDTH, rightWidth.value))
@@ -392,6 +398,7 @@ function closeOverlayPanels(): void {
           </template>
           <QueryEditor v-if="tab.type === 'query'" :ref="(instance) => setQueryEditorRef(tab.id, instance)" :tab="tab" />
           <DataGrid v-else-if="tab.type === 'table'" :tab="tab" />
+          <CollectionDesigner v-else-if="tab.type === 'structure' && ['point', 'document'].includes(recordModelOf(tab.connectionId) ?? '')" :tab="tab" />
           <StructureDesigner v-else-if="tab.type === 'structure'" :tab="tab" />
           <ObjectListView v-else-if="tab.type === 'objects'" :tab="tab" />
           <AuditLog v-else />

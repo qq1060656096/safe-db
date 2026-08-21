@@ -4,6 +4,7 @@ import type {
   AgentApprovalRequest,
   AuditFilter,
   ConnectionConfig,
+  DatabaseOperation,
   ExportOptions,
   SavedQueryInput,
   TableDataQuery
@@ -67,10 +68,13 @@ const api: Api = {
   getRoutineDefinition: (id, database, routine, type, schema, argumentsSignature) =>
     ipcRenderer.invoke('db:routineDefinition', id, database, routine, type, schema, argumentsSignature),
   getTableData: (id: string, q: TableDataQuery) => ipcRenderer.invoke('db:tableData', id, q),
+  getDriverCapabilities: (id: string) => ipcRenderer.invoke('db:capabilities', id),
 
   // SQL 执行
   executeSql: (id: string, sql: string, database?: string) =>
     ipcRenderer.invoke('exec:sql', id, sql, database),
+  executeOperation: (id: string, operation: DatabaseOperation) =>
+    ipcRenderer.invoke('exec:operation', id, operation),
   cancelSql: (id: string) => ipcRenderer.invoke('exec:cancel', id),
   confirmExecute: (token: string) => ipcRenderer.invoke('exec:confirm', token),
   rejectExecute: (token: string) => ipcRenderer.invoke('exec:reject', token),

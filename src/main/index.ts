@@ -89,6 +89,27 @@ function sendPendingAgentApprovals(window: BrowserWindow): void {
   }
 }
 
+function installEditableContextMenu(window: BrowserWindow): void {
+  window.webContents.on('context-menu', (_event, params) => {
+    // Electron 不会为 CodeMirror 等可编辑区域自动提供右键菜单。
+    // 仅处理可编辑控件，避免覆盖结果表格、侧边栏和标签页的自定义菜单。
+    if (!params.isEditable) return
+
+    const { editFlags } = params
+    const menu = Menu.buildFromTemplate([
+      { role: 'undo', enabled: editFlags.canUndo },
+      { role: 'redo', enabled: editFlags.canRedo },
+      { type: 'separator' },
+      { role: 'cut', enabled: editFlags.canCut },
+      { role: 'copy', enabled: editFlags.canCopy },
+      { role: 'paste', enabled: editFlags.canPaste },
+      { type: 'separator' },
+      { role: 'selectAll', enabled: editFlags.canSelectAll }
+    ])
+    menu.popup({ window })
+  })
+}
+
 function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
   const sourceBounds = sourceWindow?.getNormalBounds()
   const displayBounds = sourceBounds ? screen.getDisplayMatching(sourceBounds).workArea : undefined
@@ -118,6 +139,7 @@ function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
     }
   })
   windows.add(window)
+  installEditableContextMenu(window)
   window.webContents.on('did-finish-load', () => {
     sendPendingAgentApprovals(window)
     notifyWindowMode(window)

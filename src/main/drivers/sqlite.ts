@@ -1,5 +1,7 @@
 import Database from 'better-sqlite3'
 import type {
+  DatabaseObjectRef,
+  DatabaseOperation,
   ColumnInfo,
   CheckConstraintInfo,
   ForeignKeyInfo,
@@ -8,8 +10,10 @@ import type {
   RoutineInfo,
   TableInfo
 } from '../../shared/types'
-import { sanitizeRows, buildWhereClause, type DbDriver, type TableDataQuery, type TableDataResult } from './base'
+import { sanitizeRows, buildWhereClause, type DbDriver, type DriverOperationResult, type TableDataQuery, type TableDataResult } from './base'
 import { splitSqlStatements } from '../core/sqlSplit'
+import { capabilitiesForType } from './capabilities'
+import { compileRelationalOperation } from './relationalOperation'
 
 type SqliteDb = InstanceType<typeof Database>
 
@@ -19,6 +23,7 @@ function quoteIdent(name: string): string {
 }
 
 export class SqliteDriver implements DbDriver {
+  readonly capabilities = capabilitiesForType('sqlite')
   private db: SqliteDb | null = null
 
   constructor(private filePath: string) {}
@@ -231,6 +236,87 @@ export class SqliteDriver implements DbDriver {
       total: totalRow.n,
       editable: keyCols.length > 0,
       keyColumns: keyCols[0] === 'rowid' ? ['__rowid__'] : keyCols
+    }
+  }
+
+  private operationTable(target: DatabaseObjectRef): string {
+    if (target.kind !== 'table') throw new Error('SQLite 结构化操作只支持表对象')
+    return `${quoteIdent(target.database ?? 'main')}.${quoteIdent(target.name)}`
+  }
+
+  private operationColumn(name: string): string {
+    return quoteIdent(name === '__rowid__' ? 'rowid' : name)
+  }
+
+  /** SQLite 网格写入全部参数绑定，并在一个本地事务中原子执行。 */
+  async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const d = this.requireDb()
+    if (operation.kind === 'records.mutate') {
+      const table = this.operationTable(operation.target)
+      let affectedRows = 0
+      const execute = d.transaction(() => {
+        for (const mutation of operation.mutations) {
+          if (mutation.kind === 'insert') {
+            const entries = Object.entries(mutation.values)
+            const columns = entries.map(([name]) => this.operationColumn(name)).join(', ')
+            const placeholders = entries.map(() => '?').join(', ')
+            affectedRows += d.prepare(`INSERT INTO ${table} (${columns}) VALUES (${placeholders})`).run(...entries.map(([, value]) => value)).changes
+            continue
+          }
+          const keys = Object.entries(mutation.key)
+          const where = keys.map(([name]) => `${this.operationColumn(name)} IS ?`).join(' AND ')
+          if (mutation.kind === 'delete') {
+            affectedRows += d.prepare(`DELETE FROM ${table} WHERE ${where}`).run(...keys.map(([, value]) => value)).changes
+            continue
+          }
+          const changes = Object.entries(mutation.changes)
+          const set = changes.map(([name]) => `${this.operationColumn(name)} = ?`).join(', ')
+          affectedRows += d.prepare(`UPDATE ${table} SET ${set} WHERE ${where}`).run(
+            ...changes.map(([, value]) => value),
+            ...keys.map(([, value]) => value)
+          ).changes
+        }
+      })
+      execute()
+      return {
+        results: [{ kind: 'exec', affectedRows }], atomicity: 'transaction',
+        succeeded: operation.mutations.length, failed: 0
+      }
+    }
+    if (operation.kind === 'records.clear') {
+      const affectedRows = d.prepare(`DELETE FROM ${this.operationTable(operation.target)}`).run().changes
+      return { results: [{ kind: 'exec', affectedRows }], atomicity: 'transaction', succeeded: affectedRows, failed: 0 }
+    }
+    if (operation.kind === 'object.drop') {
+      d.exec(`DROP TABLE ${this.operationTable(operation.target)}`)
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'transaction', succeeded: 1, failed: 0 }
+    }
+    if (operation.kind === 'object.copy') {
+      if (operation.source.kind !== 'table') throw new Error('SQLite 只能复制表对象')
+      const ddl = await this.getObjectDdl(operation.source.database, operation.source.name)
+      const prefix = /^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)/i
+      if (!prefix.test(ddl)) throw new Error('无法解析 SQLite 建表定义')
+      const target = this.operationTable({ ...operation.source, name: operation.targetName })
+      const create = ddl.replace(prefix, `$1${target}`).replace(/;\s*$/, '')
+      const source = this.operationTable(operation.source)
+      const execute = d.transaction(() => {
+        d.exec(create)
+        if (operation.withData) d.exec(`INSERT INTO ${target} SELECT * FROM ${source}`)
+      })
+      execute()
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'transaction', succeeded: 1, failed: 0 }
+    }
+    const commands = compileRelationalOperation(operation, 'sqlite')
+    let affectedRows = 0
+    const execute = d.transaction(() => {
+      for (const command of commands) {
+        affectedRows += d.prepare(command.sql).run(...command.params).changes
+      }
+    })
+    execute()
+    return {
+      results: [{ kind: 'exec', affectedRows }], atomicity: 'transaction',
+      succeeded: 1, failed: 0
     }
   }
 

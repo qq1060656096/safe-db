@@ -65,6 +65,9 @@ const service = new AgentService(
   (request) => notifications.push(request)
 )
 
+const capabilities = await service.handle('capabilities', {})
+assert.ok(capabilities.data.databases.includes('qdrant'))
+
 const listed = await service.handle('connection.list', {})
 assert.equal(listed.status, 'ok')
 assert.deepEqual(listed.data.connections[0], {
