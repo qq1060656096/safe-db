@@ -12,6 +12,7 @@ import type {
 import { classifyMongoCommand, parseMongoCommands } from '../core/nativeCommand'
 import type { DbDriver, DriverOperationResult, TableDataQuery, TableDataResult } from './base'
 import { capabilitiesForType } from './capabilities'
+import { beginExternalExecution, finishExternalExecution, traceExecution, type ExternalExecutionHandle } from '../audit/trace'
 
 function displayValue(value: unknown): unknown {
   if (value === null || value === undefined) return null
@@ -84,6 +85,36 @@ export class MongoDriver implements DbDriver {
     }
   ) {}
 
+  private createClient(): MongoClient {
+    const client = new MongoClient(this.uri(), { serverSelectionTimeoutMS: 10000, monitorCommands: true })
+    const active = new Map<number, ExternalExecutionHandle | null>()
+    const credentialCommands = new Set(['authenticate', 'saslstart', 'saslcontinue', 'getnonce'])
+    client.on('commandStarted', (event) => {
+      if (credentialCommands.has(event.commandName.toLowerCase())) return
+      active.set(event.requestId, beginExternalExecution({
+        protocol: 'mongodb', driverType: 'mongodb', commandName: event.commandName,
+        databaseName: event.databaseName,
+        sensitive: { command: event.command }
+      }))
+    })
+    client.on('commandSucceeded', (event) => {
+      const handle = active.get(event.requestId)
+      active.delete(event.requestId)
+      const reply = event.reply as { cursor?: { firstBatch?: unknown[]; nextBatch?: unknown[] }; n?: number; nModified?: number }
+      const batch = reply?.cursor?.firstBatch ?? reply?.cursor?.nextBatch
+      finishExternalExecution(handle ?? null, 'success', {
+        returnedRows: Array.isArray(batch) ? batch.length : null,
+        affectedRows: reply?.nModified ?? reply?.n ?? null
+      })
+    })
+    client.on('commandFailed', (event) => {
+      const handle = active.get(event.requestId)
+      active.delete(event.requestId)
+      finishExternalExecution(handle ?? null, 'error', {}, event.failure)
+    })
+    return client
+  }
+
   private uri(): string {
     const auth = this.cfg.user
       ? `${encodeURIComponent(this.cfg.user)}:${encodeURIComponent(this.cfg.password ?? '')}@`
@@ -97,8 +128,11 @@ export class MongoDriver implements DbDriver {
 
   async connect(): Promise<void> {
     if (this.client) return
-    const client = new MongoClient(this.uri(), { serverSelectionTimeoutMS: 10000 })
-    await client.connect()
+    const client = this.createClient()
+    await traceExecution({
+      protocol: 'driver', driverType: 'mongodb', commandName: 'CONNECT',
+      databaseName: this.cfg.database, sensitive: { command: { action: 'connect' } }
+    }, () => client.connect())
     this.client = client
   }
 
@@ -113,9 +147,12 @@ export class MongoDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const client = new MongoClient(this.uri(), { serverSelectionTimeoutMS: 10000 })
+    const client = this.createClient()
     try {
-      await client.connect()
+      await traceExecution({
+        protocol: 'driver', driverType: 'mongodb', commandName: 'CONNECT',
+        databaseName: this.cfg.database, sensitive: { command: { action: 'connect' } }
+      }, () => client.connect())
       await client.db(this.cfg.database || 'admin').command({ ping: 1 })
     } finally {
       await client.close()

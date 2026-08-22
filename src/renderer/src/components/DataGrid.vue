@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onMounted, ref, watch } from 'vue'
 import { ColumnWidthOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FilterOutlined, PlusOutlined, ReloadOutlined, SaveOutlined, UndoOutlined } from '@vicons/antd'
-import { NAlert, NButton, NCard, NDataTable, NDropdown, NFormItem, NIcon, NInput, NModal, NPagination, NSelect, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
+import { NAlert, NButton, NCard, NDataTable, NDropdown, NFormItem, NIcon, NInput, NInputNumber, NModal, NPagination, NSelect, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DataTableSortState, type DropdownOption, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { ColumnFilter, ColumnInfo, DatabaseOperation, DbType, RecordMutation, TableDataResult } from '../../../shared/types'
+import type { ColumnFilter, ColumnInfo, DatabaseOperation, DbType, QdrantFilterClause, QdrantFilterCondition, QdrantFilterOperator, QdrantTableQuery, RecordMutation, TableDataResult } from '../../../shared/types'
+import { reconcileColumnOrder, useColumnOrder } from '../columnOrder'
 import { useContextMenuDismiss } from '../contextMenu'
 import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
@@ -12,6 +13,7 @@ import { isNumericColumn, toCsv, toJson } from '../utils'
 
 interface NewRow { tempId: string; values: Record<string, unknown> }
 interface FilterInput { op: ColumnFilter['op']; value: string }
+interface QdrantFilterInput extends QdrantFilterCondition { id: string }
 
 const props = defineProps<{ tab: AppTab }>()
 const store = useAppStore()
@@ -46,12 +48,19 @@ useContextMenuDismiss(() => {
   columnMenuShow.value = false
 })
 const selectedColumnSet = new Set<string>()
+const sourceColumnNames = computed(() => (data.value?.columns ?? []).map((column) => column.name))
 const columnLayoutScope = computed(() => tableColumnLayoutScope({
   connectionId: props.tab.connectionId,
   database: props.tab.database,
   schema: props.tab.schema,
   table: props.tab.table
 }))
+const {
+  orderedColumns: columnNames,
+  suppressColumnClick,
+  columnDragProps,
+  columnDragClass
+} = useColumnOrder(sourceColumnNames, columnLayoutScope)
 const columnWidths = ref<Record<string, number>>({})
 const tableInstanceKey = ref(0)
 const editingCell = ref<{ rowKey: string; column: string } | null>(null)
@@ -62,8 +71,15 @@ const pointIdInput = ref('')
 const pointVectorInput = ref('')
 const pointPayloadInput = ref('{}')
 const showFilter = ref(false)
+const showVectorSearch = ref(false)
 const filterInputs = ref<Record<string, FilterInput>>({})
 const appliedFilters = ref<ColumnFilter[]>([])
+const qdrantFilterInputs = ref<QdrantFilterInput[]>([])
+const appliedQdrantQuery = ref<QdrantTableQuery | undefined>()
+const vectorFieldName = ref<string | null>(null)
+const vectorInput = ref('')
+const vectorScoreThreshold = ref<number | null>(null)
+const vectorLimit = ref<number | null>(20)
 const exporting = ref(false)
 const connection = computed(() => store.connections.find((item) => item.id === props.tab.connectionId))
 const capabilities = computed(() => props.tab.connectionId ? store.driverCapabilities[props.tab.connectionId] : undefined)
@@ -75,21 +91,49 @@ const canUpdate = computed(() => writableConnection.value && capabilities.value?
 const canDelete = computed(() => writableConnection.value && capabilities.value?.records.delete.supported === true && data.value?.recordOperations?.delete !== false)
 const keyColumns = computed(() => data.value?.keyColumns ?? [])
 const baseRows = computed(() => data.value?.rows ?? [])
-const columnNames = computed(() => (data.value?.columns ?? []).map((column) => column.name))
 const tableScrollX = computed(() => 104 + columnNames.value.reduce((total, name) => total + (columnWidths.value[name] ?? DEFAULT_COLUMN_WIDTH), 0))
 const selectedColumnNames = computed(() => {
   const selected = new Set(selectedColumns.value)
   return columnNames.value.filter((column) => selected.has(column))
 })
-const activeFilterCount = computed(() => appliedFilters.value.length)
+const activeFilterCount = computed(() => isQdrant.value
+  ? appliedQdrantQuery.value?.filter?.length ?? 0
+  : appliedFilters.value.length)
+const vectorSearchActive = computed(() => Boolean(appliedQdrantQuery.value?.vector))
+const denseVectorFields = computed(() => (data.value?.vectorFields ?? []).filter((field) => field.kind === 'dense'))
+const vectorFieldOptions = computed<SelectOption[]>(() => denseVectorFields.value.map((field) => ({
+  value: field.name ?? '__default__',
+  label: field.name
+    ? `${field.name} · ${field.size ?? '?'} · ${field.distance ?? '-'}`
+    : `${t('grid.defaultVector')} · ${field.size ?? '?'} · ${field.distance ?? '-'}`
+})))
 const dirtyCount = computed(() => [...edits.value.values()].reduce((count, values) => count + values.size, 0) + newRows.value.reduce((count, row) => count + (Object.keys(row.values).length ? 1 : 0), 0) + deletedKeys.value.size)
 const operatorOptions = computed<SelectOption[]>(() => [
   { value: '=', label: '=' }, { value: '!=', label: '!=' }, { value: '>', label: '>' }, { value: '>=', label: '>=' }, { value: '<', label: '<' }, { value: '<=', label: '<=' },
   { value: 'like', label: 'LIKE' }, { value: 'notlike', label: 'NOT LIKE' }, { value: 'null', label: 'IS NULL' }, { value: 'notnull', label: 'IS NOT NULL' }
 ])
+const qdrantClauseOptions = computed<SelectOption[]>(() => [
+  { value: 'must', label: t('grid.qdrantMust') },
+  { value: 'must_not', label: t('grid.qdrantMustNot') }
+])
+const qdrantOperatorOptions = computed<SelectOption[]>(() => [
+  { value: 'match', label: t('grid.qdrantMatch') },
+  { value: 'match_any', label: t('grid.qdrantMatchAny') },
+  { value: 'text', label: t('grid.qdrantText') },
+  { value: 'phrase', label: t('grid.qdrantPhrase') },
+  { value: '>', label: '>' }, { value: '>=', label: '>=' },
+  { value: '<', label: '<' }, { value: '<=', label: '<=' },
+  { value: 'empty', label: t('grid.qdrantEmpty') },
+  { value: 'null', label: t('grid.qdrantNull') }
+])
 const exportOptions = computed<DropdownOption[]>(() => [
-  { key: 'csv-page', label: t('grid.exportPageCsv') }, { key: 'json-page', label: t('grid.exportPageJson') }, { type: 'divider', key: 'divider' },
-  { key: 'csv-all', label: t('grid.exportAllCsv') }, { key: 'json-all', label: t('grid.exportAllJson') }
+  { key: 'csv-page', label: t(data.value?.paginationMode === 'none' ? 'grid.exportResultsCsv' : 'grid.exportPageCsv') },
+  { key: 'json-page', label: t(data.value?.paginationMode === 'none' ? 'grid.exportResultsJson' : 'grid.exportPageJson') },
+  ...(data.value?.paginationMode === 'none' ? [] : [
+    { type: 'divider' as const, key: 'divider' },
+    { key: 'csv-all', label: t('grid.exportAllCsv') },
+    { key: 'json-all', label: t('grid.exportAllJson') }
+  ])
 ])
 const rowCopyOptions = computed<DropdownOption[]>(() => {
   const dataOptions: DropdownOption[] = [
@@ -166,6 +210,96 @@ function buildFilters(): ColumnFilter[] {
   }
   return filters
 }
+function qdrantValueDisabled(op: QdrantFilterOperator): boolean {
+  return op === 'empty' || op === 'null'
+}
+function addQdrantFilter(): void {
+  const firstPayload = data.value?.columns.find((column) => column.name.startsWith('payload.'))?.name ?? 'payload.'
+  qdrantFilterInputs.value = [...qdrantFilterInputs.value, {
+    id: crypto.randomUUID(), clause: 'must', field: firstPayload, op: 'match', value: ''
+  }]
+}
+function updateQdrantFilter(id: string, patch: Partial<QdrantFilterInput>): void {
+  qdrantFilterInputs.value = qdrantFilterInputs.value.map((item) => item.id === id ? { ...item, ...patch } : item)
+}
+function removeQdrantFilter(id: string): void {
+  qdrantFilterInputs.value = qdrantFilterInputs.value.filter((item) => item.id !== id)
+}
+function buildQdrantFilters(): QdrantFilterCondition[] {
+  return qdrantFilterInputs.value.map((item) => {
+    const field = item.field.trim()
+    if (!field || field === 'payload.') throw new Error(t('grid.qdrantFilterFieldRequired'))
+    const value = item.value?.trim()
+    if (!qdrantValueDisabled(item.op) && !value) throw new Error(t('grid.qdrantFilterValueRequired', { field }))
+    return { clause: item.clause, field, op: item.op, ...(qdrantValueDisabled(item.op) ? {} : { value }) }
+  })
+}
+function selectedDenseVectorField() {
+  const selected = vectorFieldName.value
+  return denseVectorFields.value.find((field) => (field.name ?? '__default__') === selected)
+}
+function buildVectorQuery(): NonNullable<QdrantTableQuery['vector']> {
+  let vector: unknown
+  try { vector = JSON.parse(vectorInput.value) }
+  catch { throw new Error(t('grid.vectorQueryInvalid')) }
+  if (!Array.isArray(vector) || vector.length === 0 || vector.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+    throw new Error(t('grid.vectorQueryInvalid'))
+  }
+  const field = selectedDenseVectorField()
+  if (!field) throw new Error(t('grid.vectorFieldRequired'))
+  if (field.size !== undefined && vector.length !== field.size) {
+    throw new Error(t('grid.vectorDimensionMismatch', { expected: field.size, actual: vector.length }))
+  }
+  if (vectorLimit.value === null || !Number.isSafeInteger(vectorLimit.value) || vectorLimit.value < 1 || vectorLimit.value > 500) {
+    throw new Error(t('grid.vectorLimitInvalid'))
+  }
+  return {
+    vector,
+    ...(field.name ? { using: field.name } : {}),
+    ...(vectorScoreThreshold.value === null ? {} : { scoreThreshold: vectorScoreThreshold.value }),
+    limit: vectorLimit.value
+  }
+}
+function setAppliedQdrantQuery(
+  vector: QdrantTableQuery['vector'] | undefined,
+  filter: QdrantFilterCondition[]
+): void {
+  resetCursor()
+  appliedQdrantQuery.value = vector || filter.length
+    ? { type: 'qdrant', ...(vector ? { vector } : {}), ...(filter.length ? { filter } : {}) }
+    : undefined
+}
+function applyQdrantFilters(): void {
+  try {
+    setAppliedQdrantQuery(appliedQdrantQuery.value?.vector, buildQdrantFilters())
+  } catch (error) {
+    message.warning(error instanceof Error ? error.message : String(error))
+  }
+}
+function clearQdrantFilters(): void {
+  qdrantFilterInputs.value = []
+  setAppliedQdrantQuery(appliedQdrantQuery.value?.vector, [])
+}
+function runVectorSearch(): void {
+  try {
+    orderBy.value = []
+    setAppliedQdrantQuery(buildVectorQuery(), buildQdrantFilters())
+  } catch (error) {
+    message.warning(error instanceof Error ? error.message : String(error))
+  }
+}
+function clearVectorSearch(): void {
+  vectorInput.value = ''
+  vectorScoreThreshold.value = null
+  setAppliedQdrantQuery(undefined, appliedQdrantQuery.value?.filter ?? [])
+}
+function syncVectorFieldSelection(): void {
+  if (!isQdrant.value) return
+  const values = new Set(denseVectorFields.value.map((field) => field.name ?? '__default__'))
+  if (!vectorFieldName.value || !values.has(vectorFieldName.value)) {
+    vectorFieldName.value = (vectorFieldOptions.value[0]?.value as string | undefined) ?? null
+  }
+}
 async function load(): Promise<void> {
   if (!props.tab.connectionId || !props.tab.table) return
   const request = ++loadRequest
@@ -174,10 +308,12 @@ async function load(): Promise<void> {
     const result = await store.getTableData(props.tab.connectionId, {
       database: props.tab.database, schema: props.tab.schema, table: props.tab.table, page: page.value, pageSize: pageSize.value,
       cursor: cursorHistory.value[page.value - 1], includeVectors: includeVectors.value,
-      orderBy: orderBy.value, filters: appliedFilters.value
+      orderBy: orderBy.value, filters: appliedFilters.value,
+      nativeQuery: isQdrant.value ? appliedQdrantQuery.value : undefined
     })
     if (request !== loadRequest) return
     data.value = result
+    syncVectorFieldSelection()
     if (data.value.paginationMode === 'cursor') {
       const history = cursorHistory.value.slice(0, page.value)
       if (data.value.nextCursor !== undefined) history[page.value] = data.value.nextCursor
@@ -198,7 +334,7 @@ async function load(): Promise<void> {
     if (request === loadRequest) loading.value = false
   }
 }
-watch([page, orderBy, appliedFilters], load, { deep: true })
+watch([page, orderBy, appliedFilters, appliedQdrantQuery], load, { deep: true })
 watch(includeVectors, () => {
   cursorHistory.value = [undefined]
   if (page.value === 1) void load()
@@ -401,7 +537,10 @@ async function exportData(format: 'csv' | 'json', scope: 'page' | 'all'): Promis
     let capped = false
     if (scope === 'all') {
       const cap = 50000
-      if (data.value.paginationMode === 'cursor') {
+      if (data.value.paginationMode === 'none') {
+        columns = data.value.columns
+        rows = baseRows.value
+      } else if (data.value.paginationMode === 'cursor') {
         const result = await loadCursorRows(cap)
         columns = result.columns; rows = result.rows
       } else {
@@ -413,6 +552,12 @@ async function exportData(format: 'csv' | 'json', scope: 'page' | 'all'): Promis
       }
       capped = data.value.total > cap
     }
+    const order = reconcileColumnOrder(columns.map((column) => column.name), columnNames.value)
+    const columnsByName = new Map(columns.map((column) => [column.name, column]))
+    columns = order.flatMap((name) => {
+      const column = columnsByName.get(name)
+      return column ? [column] : []
+    })
     const projected = projectRows(columns, rows)
     const content = format === 'csv' ? toCsv(columns.map((column) => column.name), projected) : toJson(projected)
     const path = await window.api.exportData({ defaultName: `${props.tab.table}.${format}`, content, fileTypes: [format === 'csv' ? { name: 'CSV', extensions: ['csv'] } : { name: 'JSON', extensions: ['json'] }] })
@@ -448,6 +593,7 @@ function displayedValue(row: Record<string, unknown>, column: string): unknown {
 function selectColumnFromHeader(event: MouseEvent): void {
   if (!(event.target instanceof Element)) return
   if (event.target.closest('[data-data-table-resizable]')) return
+  if (suppressColumnClick.value) { event.preventDefault(); event.stopPropagation(); return }
   const header = event.target.closest('.n-data-table-th[data-col-key]') as HTMLElement | null
   const column = header?.dataset.colKey
   if (!header || !column || !tableRoot.value?.contains(header) || !columnNames.value.includes(column)) return
@@ -464,7 +610,7 @@ function updateColumnWidth(
   columnWidths.value = { ...columnWidths.value, [key]: limitedWidth }
   layoutStore.setColumnWidth(columnLayoutScope.value, key, limitedWidth)
 }
-function resetColumnWidths(): void {
+function resetColumnLayout(): void {
   layoutStore.resetColumnLayout(columnLayoutScope.value)
   message.success(t('layout.columnsReset'))
 }
@@ -560,7 +706,7 @@ function selectedDisplayRows(): Record<string, unknown>[] {
 async function copySelectedRows(includeHeaders: boolean, includeValues: boolean): Promise<void> {
   if (!data.value) return
   const rows = selectedDisplayRows()
-  const names = data.value.columns.map((column) => column.name)
+  const names = columnNames.value
   const plainRows: string[] = []
   if (includeHeaders) plainRows.push(names.map(tableCell).join('\t'))
   if (includeValues) plainRows.push(...rows.map((row) => names.map((column) => tableCell(displayedValue(row, column))).join('\t')))
@@ -578,7 +724,7 @@ async function copySelectedRows(includeHeaders: boolean, includeValues: boolean)
 }
 async function copySelectedRowsAs(format: 'json' | 'csv'): Promise<void> {
   if (!data.value) return
-  const names = data.value.columns.map((column) => column.name)
+  const names = columnNames.value
   const projected = selectedDisplayRows().map((row) => Object.fromEntries(names.map((column) => [column, displayedValue(row, column)])))
   const text = format === 'json' ? toJson(projected) : toCsv(names, projected).replace(/^\uFEFF/, '')
   await navigator.clipboard.writeText(text)
@@ -593,7 +739,7 @@ function copiedSql(kind: 'select' | 'insert' | 'update' | 'delete'): string {
     ? `${qi(props.tab.schema ?? 'public')}.${qi(table)}`
     : type === 'sqlserver' ? `${qi(props.tab.schema ?? 'dbo')}.${qi(table)}`
     : props.tab.database ? `${qi(props.tab.database)}.${qi(table)}` : qi(table)
-  const names = data.value.columns.map((column) => column.name)
+  const names = columnNames.value
   const columnOf = (name: string): ColumnInfo | undefined => data.value?.columns.find((column) => column.name === name)
   if (kind === 'insert') {
     return rows.map((row) => `INSERT INTO ${qualified} (${names.map(qi).join(', ')}) VALUES (${names.map((column) => toLiteral(displayedValue(row, column), columnOf(column), type)).join(', ')});`).join('\n')
@@ -648,7 +794,7 @@ function renderCell(value: unknown, row: Record<string, unknown>, column: Column
   }
   const modified = isNew ? newRows.value.find((item) => item.tempId === rowKey)?.values[column.name] !== undefined : edits.value.get(rowKey)?.has(column.name)
   const editable = data.value?.editable && (isNew ? canInsert.value : canUpdate.value) && (isNew || !column.isPrimaryKey)
-    && (!isQdrant.value || column.name !== 'vector' || includeVectors.value)
+    && (!isQdrant.value || (column.name !== 'score' && (column.name !== 'vector' || includeVectors.value)))
   return h('div', {
     class: [editable && 'grid-cell-editable', modified && 'grid-cell-edited'],
     onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', current),
@@ -657,6 +803,7 @@ function renderCell(value: unknown, row: Record<string, unknown>, column: Column
 }
 const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
   if (!data.value) return []
+  const columnsByName = new Map(data.value.columns.map((column) => [column.name, column]))
   return [
     {
       title: '#',
@@ -667,24 +814,28 @@ const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
       render: (row: Record<string, unknown>) => h('span', { class: 'table-row-number' }, row.__tempId ? '*' : (page.value - 1) * pageSize.value + Number(row.__rowIndex) + 1)
     },
     { type: 'selection', fixed: 'left' as const, disabled: (row) => Boolean(row.__tempId) },
-    ...data.value.columns.map((column) => ({
-      title: () => h('span', {
-        class: 'result-column-header',
-        title: `${column.name}\n${t('query.columnSelectionHelp')}`
-      }, [column.isPrimaryKey ? h('span', { class: 'primary-key', title: t('grid.primaryKey') }, '🔑') : null, column.name, h('small', { class: 'column-type' }, column.dataType)]),
-      key: column.name,
-      width: columnWidths.value[column.name] ?? DEFAULT_COLUMN_WIDTH,
-      minWidth: MIN_COLUMN_WIDTH,
-      maxWidth: MAX_COLUMN_WIDTH,
-      resizable: true,
-      fixed: column.isPrimaryKey ? 'left' as const : undefined,
-      className: 'copyable-data-column',
-      cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
-      ellipsis: { tooltip: true },
-      sorter: isQdrant.value && ['id', 'payload', 'vector'].includes(column.name) ? false : 'default' as const,
-      sortOrder: orderBy.value[0]?.column === column.name ? (orderBy.value[0].direction === 'asc' ? 'ascend' as const : 'descend' as const) : false as const,
-      render: (row: Record<string, unknown>) => renderCell(row[column.name], row, column)
-    }))
+    ...columnNames.value.flatMap((name) => {
+      const column = columnsByName.get(name)
+      if (!column) return []
+      return [{
+        title: () => h('span', {
+          ...columnDragProps(column.name),
+          class: ['result-column-header', 'draggable-column-header', columnDragClass(column.name)],
+          title: `${column.name}\n${t('query.columnSelectionHelp')}`
+        }, [column.isPrimaryKey ? h('span', { class: 'primary-key', title: t('grid.primaryKey') }, '🔑') : null, column.name, h('small', { class: 'column-type' }, column.dataType)]),
+        key: column.name,
+        width: columnWidths.value[column.name] ?? DEFAULT_COLUMN_WIDTH,
+        minWidth: MIN_COLUMN_WIDTH,
+        maxWidth: MAX_COLUMN_WIDTH,
+        resizable: true,
+        className: 'copyable-data-column',
+        cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
+        ellipsis: { tooltip: true },
+        sorter: vectorSearchActive.value || (isQdrant.value && ['id', 'payload', 'vector', 'score'].includes(column.name)) ? false : 'default' as const,
+        sortOrder: !vectorSearchActive.value && orderBy.value[0]?.column === column.name ? (orderBy.value[0].direction === 'asc' ? 'ascend' as const : 'descend' as const) : false as const,
+        render: (row: Record<string, unknown>) => renderCell(row[column.name], row, column)
+      }]
+    })
   ]
 })
 const tableRows = computed<Record<string, unknown>[]>(() => [
@@ -755,8 +906,9 @@ function nextCursorPage(): void { if (data.value?.nextCursor !== undefined) page
     <div class="module-toolbar grid-toolbar">
       <NButton size="small" :loading="loading" @click="load"><template #icon><NIcon><ReloadOutlined /></NIcon></template>{{ t('common.refresh') }}</NButton>
       <NButton size="small" :type="showFilter || activeFilterCount ? 'primary' : 'default'" :secondary="activeFilterCount > 0" @click="showFilter = !showFilter"><template #icon><NIcon><FilterOutlined /></NIcon></template>{{ t('grid.filter') }}<template v-if="activeFilterCount"> ({{ activeFilterCount }})</template></NButton>
+      <NButton v-if="isQdrant" size="small" :type="showVectorSearch || vectorSearchActive ? 'primary' : 'default'" :secondary="vectorSearchActive" @click="showVectorSearch = !showVectorSearch">{{ t('grid.vectorSearch') }}<template v-if="vectorSearchActive"> · {{ t('grid.active') }}</template></NButton>
       <NDropdown :options="exportOptions" :disabled="!data || data.rows.length === 0" @select="onExportSelect"><NButton size="small" :loading="exporting"><template #icon><NIcon><DownloadOutlined /></NIcon></template>{{ t('common.export') }}</NButton></NDropdown>
-      <NButton size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnWidths"><template #icon><NIcon><ColumnWidthOutlined /></NIcon></template>{{ t('layout.resetColumns') }}</NButton>
+      <NButton size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnLayout"><template #icon><NIcon><ColumnWidthOutlined /></NIcon></template>{{ t('layout.resetColumns') }}</NButton>
       <NButton v-if="isQdrant" size="small" :type="includeVectors ? 'primary' : 'default'" @click="includeVectors = !includeVectors">{{ t(includeVectors ? 'grid.hideVectors' : 'grid.showVectors') }}</NButton>
       <NDropdown trigger="click" :options="rowCopyOptions" :disabled="selectedKeys.length === 0" @select="copySelected"><NButton size="small" :disabled="selectedKeys.length === 0"><template #icon><NIcon><CopyOutlined /></NIcon></template>{{ t('query.copy') }}<template v-if="selectedKeys.length"> ({{ selectedKeys.length }})</template></NButton></NDropdown>
       <NButton size="small" :disabled="!data?.editable || !canInsert" @click="isQdrant ? openInsertPoint() : addRow()"><template #icon><NIcon><PlusOutlined /></NIcon></template>{{ t(isQdrant ? 'grid.addPoint' : 'grid.addRow') }}</NButton>
@@ -765,16 +917,52 @@ function nextCursorPage(): void { if (data.value?.nextCursor !== undefined) page
       <NButton size="small" type="primary" :disabled="dirtyCount === 0 || !data?.editable || (!canUpdate && !canDelete && !canInsert)" :loading="saving" @click="save"><template #icon><NIcon><SaveOutlined /></NIcon></template>{{ dirtyCount ? t('grid.saveCount', { count: dirtyCount }) : t('common.save') }}</NButton>
       <span class="toolbar-meta"><NTag v-if="data && !data.editable">{{ isNative ? t('permission.readonly') : t('grid.noPrimaryKey') }}</NTag><NTag v-if="connection?.permissionMode === 'readonly'" type="info">{{ t('permission.readonlyMode') }}</NTag><NTag v-if="connection?.permissionMode === 'approval'" type="warning">{{ t('permission.approvalMode') }}</NTag></span>
     </div>
-    <div v-if="showFilter && data" class="filter-panel">
-      <p class="filter-help">{{ t('grid.filterHelp') }}</p>
-      <div class="filter-list">
-        <div v-for="column in data.columns" :key="column.name" class="filter-item">
-          <span class="filter-column" :title="column.name">{{ column.name }}</span>
-          <NSelect size="small" class="filter-operator" :aria-label="t('grid.operator')" :options="operatorOptions" :value="currentFilter(column).op" @update:value="(value) => updateFilter(column, { op: value as ColumnFilter['op'] })" />
-          <NInput size="small" clearable class="filter-value" :aria-label="t('grid.value')" :placeholder="t('grid.filterValue')" :disabled="['null', 'notnull'].includes(currentFilter(column).op)" :value="currentFilter(column).value" @update:value="(value) => updateFilter(column, { value })" @keyup.enter="applyFilters" />
-        </div>
+    <div v-if="isQdrant && showVectorSearch && data" class="qdrant-vector-panel">
+      <NAlert v-if="denseVectorFields.length === 0" type="warning">{{ t('grid.noDenseVector') }}</NAlert>
+      <div v-else class="qdrant-vector-form">
+        <NFormItem :label="t('grid.vectorField')" :show-feedback="false">
+          <NSelect v-model:value="vectorFieldName" size="small" :options="vectorFieldOptions" />
+        </NFormItem>
+        <NFormItem :label="t('grid.vectorQuery')" :show-feedback="false" class="qdrant-vector-input-item">
+          <NInput v-model:value="vectorInput" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" :placeholder="t('grid.vectorQueryPlaceholder')" />
+        </NFormItem>
+        <NFormItem :label="t('grid.scoreThreshold')" :show-feedback="false">
+          <NInputNumber v-model:value="vectorScoreThreshold" size="small" clearable :placeholder="t('grid.optional')" />
+        </NFormItem>
+        <NFormItem :label="t('grid.topK')" :show-feedback="false">
+          <NInputNumber v-model:value="vectorLimit" size="small" :min="1" :max="500" />
+        </NFormItem>
       </div>
-      <div class="filter-actions"><NButton size="small" type="primary" @click="applyFilters">{{ t('common.apply') }}</NButton><NButton size="small" :disabled="activeFilterCount === 0 && Object.keys(filterInputs).length === 0" @click="clearFilters">{{ t('common.clear') }}</NButton></div>
+      <div v-if="denseVectorFields.length" class="filter-actions">
+        <NButton size="small" type="primary" @click="runVectorSearch">{{ t('grid.runVectorSearch') }}</NButton>
+        <NButton size="small" :disabled="!vectorSearchActive && !vectorInput" @click="clearVectorSearch">{{ t('common.clear') }}</NButton>
+      </div>
+    </div>
+    <div v-if="showFilter && data" class="filter-panel">
+      <template v-if="isQdrant">
+        <p class="filter-help">{{ t('grid.qdrantFilterHelp') }}</p>
+        <div class="qdrant-filter-list">
+          <div v-for="item in qdrantFilterInputs" :key="item.id" class="qdrant-filter-item">
+            <NSelect size="small" :aria-label="t('grid.qdrantClause')" :options="qdrantClauseOptions" :value="item.clause" @update:value="(value) => updateQdrantFilter(item.id, { clause: value as QdrantFilterClause })" />
+            <NInput size="small" clearable :aria-label="t('grid.qdrantField')" :placeholder="t('grid.qdrantFieldPlaceholder')" :value="item.field" @update:value="(value) => updateQdrantFilter(item.id, { field: value })" />
+            <NSelect size="small" :aria-label="t('grid.operator')" :options="qdrantOperatorOptions" :value="item.op" @update:value="(value) => updateQdrantFilter(item.id, { op: value as QdrantFilterOperator })" />
+            <NInput size="small" clearable :aria-label="t('grid.value')" :placeholder="item.op === 'match_any' ? t('grid.qdrantArrayValue') : t('grid.filterValue')" :disabled="qdrantValueDisabled(item.op)" :value="item.value" @update:value="(value) => updateQdrantFilter(item.id, { value })" @keyup.enter="applyQdrantFilters" />
+            <NButton quaternary size="small" :title="t('common.remove')" :aria-label="t('common.remove')" @click="removeQdrantFilter(item.id)"><template #icon><NIcon><DeleteOutlined /></NIcon></template></NButton>
+          </div>
+        </div>
+        <div class="filter-actions"><NButton size="small" @click="addQdrantFilter">{{ t('grid.addFilterCondition') }}</NButton><NButton size="small" type="primary" @click="applyQdrantFilters">{{ t('common.apply') }}</NButton><NButton size="small" :disabled="activeFilterCount === 0 && qdrantFilterInputs.length === 0" @click="clearQdrantFilters">{{ t('common.clear') }}</NButton></div>
+      </template>
+      <template v-else>
+        <p class="filter-help">{{ t('grid.filterHelp') }}</p>
+        <div class="filter-list">
+          <div v-for="column in data.columns" :key="column.name" class="filter-item">
+            <span class="filter-column" :title="column.name">{{ column.name }}</span>
+            <NSelect size="small" class="filter-operator" :aria-label="t('grid.operator')" :options="operatorOptions" :value="currentFilter(column).op" @update:value="(value) => updateFilter(column, { op: value as ColumnFilter['op'] })" />
+            <NInput size="small" clearable class="filter-value" :aria-label="t('grid.value')" :placeholder="t('grid.filterValue')" :disabled="['null', 'notnull'].includes(currentFilter(column).op)" :value="currentFilter(column).value" @update:value="(value) => updateFilter(column, { value })" @keyup.enter="applyFilters" />
+          </div>
+        </div>
+        <div class="filter-actions"><NButton size="small" type="primary" @click="applyFilters">{{ t('common.apply') }}</NButton><NButton size="small" :disabled="activeFilterCount === 0 && Object.keys(filterInputs).length === 0" @click="clearFilters">{{ t('common.clear') }}</NButton></div>
+      </template>
     </div>
     <NAlert v-if="data && (!data.editable || isQdrant || data.recordOperations?.update === false)" type="info" class="module-alert">{{ readOnlyHelp }}</NAlert>
     <div ref="tableRoot" class="data-table-wrap padded" @click.capture="selectColumnFromHeader" @contextmenu.capture="openColumnMenuFromHeader">
@@ -789,6 +977,7 @@ function nextCursorPage(): void { if (data.value?.nextCursor !== undefined) page
       <span>{{ t('grid.pageNumber', { page }) }}</span>
       <NButton size="small" :disabled="data.nextCursor === undefined" @click="nextCursorPage">{{ t('grid.nextPage') }}</NButton>
     </div>
+    <div v-else-if="data?.paginationMode === 'none'" class="module-pagination vector-result-pagination">{{ t('grid.vectorReturned', { count: data.total }) }}</div>
     <NPagination v-else-if="data" v-model:page="page" v-model:page-size="pageSize" :item-count="data.total + newRows.length" :page-sizes="[50, 100, 200, 500]" show-size-picker class="module-pagination"><template #prefix>{{ t('common.totalRows', { count: data.total + newRows.length }) }}</template></NPagination>
     <NModal :show="insertPointOpen" :mask-closable="!insertingPoint" @update:show="(show) => { if (!show) closeInsertPoint() }">
       <NCard class="copy-table-modal" :title="t('grid.addPointTitle', { collection: tab.table ?? '' })" closable @close="closeInsertPoint">

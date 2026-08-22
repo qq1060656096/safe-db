@@ -324,7 +324,16 @@ export const useAppStore = defineStore('app', {
       const payload: TableDataQuery = {
         ...query,
         orderBy: query.orderBy?.map((item) => ({ ...item })),
-        filters: query.filters?.map((item) => ({ ...item }))
+        filters: query.filters?.map((item) => ({ ...item })),
+        nativeQuery: query.nativeQuery?.type === 'qdrant'
+          ? {
+              type: 'qdrant',
+              vector: query.nativeQuery.vector
+                ? { ...query.nativeQuery.vector, vector: [...query.nativeQuery.vector.vector] }
+                : undefined,
+              filter: query.nativeQuery.filter?.map((item) => ({ ...item }))
+            }
+          : undefined
       }
       return window.api.getTableData(connectionId, payload)
     }

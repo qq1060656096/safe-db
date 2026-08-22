@@ -71,6 +71,19 @@ const createKeyType = ref<'string' | 'hash' | 'list' | 'set' | 'zset' | 'stream'
 const createKeyValue = ref('')
 const creatingKey = ref(false)
 const redisTypeOptions = ['string', 'hash', 'list', 'set', 'zset', 'stream'].map((value) => ({ label: value, value }))
+const databaseTypeLabels: Record<ConnectionMeta['type'], string> = {
+  mysql: 'MySQL',
+  postgres: 'PostgreSQL',
+  sqlite: 'SQLite',
+  sqlserver: 'SQL Server',
+  mongodb: 'MongoDB',
+  redis: 'Redis',
+  qdrant: 'Qdrant'
+}
+const createDatabaseConnection = computed(() => {
+  const id = createDatabaseConnectionId.value
+  return id ? connectionOf(id) : undefined
+})
 const createCollectionIsPoint = computed(() => {
   const id = createCollectionConnectionId.value
   return id ? store.driverCapabilities[id]?.recordModel === 'point' : false
@@ -177,6 +190,12 @@ function updateExpandedKeys(keys: TreeKey[]): void {
   }
 }
 function connectionOf(id: string): ConnectionMeta | undefined { return store.connections.find((connection) => connection.id === id) }
+function connectionEndpoint(connection: ConnectionMeta): string {
+  const rawHost = connection.host?.trim()
+  if (!rawHost) return '—'
+  const host = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost
+  return connection.port === undefined ? host : `${host}:${connection.port}`
+}
 function capabilitiesOf(connection: ConnectionMeta | undefined) {
   return connection ? store.driverCapabilities[connection.id] : undefined
 }
@@ -1322,6 +1341,25 @@ function selectContextMenu(key: string | number): void {
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
     <NModal :show="createDatabaseModalOpen" :mask-closable="!creatingDatabase" @update:show="(show) => { if (!show) closeCreateDatabase() }">
       <NCard class="copy-table-modal" :title="t('sidebar.newDatabase')" closable @close="closeCreateDatabase">
+        <NFormItem v-if="createDatabaseConnection" :label="t('sidebar.targetInstance')">
+          <div class="create-database-target">
+            <div class="create-database-target-row">
+              <span class="create-database-target-label">{{ t('sidebar.targetConnectionName') }}</span>
+              <span class="create-database-target-value create-database-target-name">
+                <DatabaseTypeIcon :type="createDatabaseConnection.type" :color="createDatabaseConnection.color" :size="18" />
+                <strong>{{ createDatabaseConnection.name }}</strong>
+              </span>
+            </div>
+            <div class="create-database-target-row">
+              <span class="create-database-target-label">{{ t('sidebar.targetDatabaseType') }}</span>
+              <span class="create-database-target-value">{{ databaseTypeLabels[createDatabaseConnection.type] }}</span>
+            </div>
+            <div class="create-database-target-row">
+              <span class="create-database-target-label">{{ t('sidebar.targetServerAddress') }}</span>
+              <span class="create-database-target-value create-database-target-endpoint">{{ connectionEndpoint(createDatabaseConnection) }}</span>
+            </div>
+          </div>
+        </NFormItem>
         <NFormItem :label="t('sidebar.databaseName')" required>
           <NInput v-model:value="createDatabaseName" autofocus :disabled="creatingDatabase" :placeholder="t('sidebar.databaseNamePlaceholder')" @keyup.enter="confirmCreateDatabase" />
         </NFormItem>

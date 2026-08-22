@@ -19,6 +19,7 @@ import {
 } from './base'
 import { capabilitiesForType } from './capabilities'
 import { compileRelationalOperation } from './relationalOperation'
+import { traceExecution } from '../audit/trace'
 
 /** 双引号包裹标识符 */
 function quoteIdent(name: string): string {
@@ -56,13 +57,50 @@ export class PostgresDriver implements DbDriver {
     return this.cfg.database || 'postgres'
   }
 
+  private instrument(client: pg.Client, database: string): pg.Client {
+    const mutable = client as unknown as { query: (...args: unknown[]) => Promise<unknown> }
+    const original = mutable.query.bind(client)
+    mutable.query = (...args: unknown[]) => {
+      const source = args[0]
+      const statement = typeof source === 'string'
+        ? source
+        : source && typeof source === 'object' && 'text' in source
+          ? String((source as { text: unknown }).text)
+          : String(source)
+      const parameters = Array.isArray(args[1])
+        ? args[1]
+        : source && typeof source === 'object' && 'values' in source && Array.isArray((source as { values?: unknown[] }).values)
+          ? (source as { values: unknown[] }).values
+          : []
+      return traceExecution({
+        protocol: 'sql', driverType: 'postgres', commandName: 'QUERY', databaseName: database,
+        sensitive: { statement, parameters }
+      }, () => original(...args), (result) => {
+        if (!result || typeof result !== 'object') return {}
+        const value = result as { rows?: unknown[]; rowCount?: number | null; command?: string }
+        return value.command === 'SELECT' || value.rows?.length
+          ? { returnedRows: value.rows?.length ?? value.rowCount ?? null }
+          : { affectedRows: value.rowCount ?? null }
+      })
+    }
+    return client
+  }
+
+  private async openClient(database: string): Promise<pg.Client> {
+    const client = this.instrument(new pg.Client(this.options(database)), database)
+    await traceExecution({
+      protocol: 'driver', driverType: 'postgres', commandName: 'CONNECT', databaseName: database,
+      sensitive: { command: { action: 'connect' } }
+    }, () => client.connect())
+    return client
+  }
+
   /** 取某库的连接,没有则新建并接入缓存 */
   private async clientFor(database?: string): Promise<pg.Client> {
     const db = database || this.defaultDb()
     const existing = this.clients.get(db)
     if (existing) return existing
-    const client = new pg.Client(this.options(db))
-    await client.connect()
+    const client = await this.openClient(db)
     this.clients.set(db, client)
     return client
   }
@@ -82,8 +120,7 @@ export class PostgresDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const c = new pg.Client(this.options(this.defaultDb()))
-    await c.connect()
+    const c = await this.openClient(this.defaultDb())
     await c.query('SELECT 1')
     await c.end()
   }

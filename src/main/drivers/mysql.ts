@@ -20,6 +20,7 @@ import {
 } from './base'
 import { capabilitiesForType } from './capabilities'
 import { compileRelationalOperation } from './relationalOperation'
+import { traceExecution } from '../audit/trace'
 
 /** 反引号包裹标识符 */
 function quoteIdent(name: string): string {
@@ -56,13 +57,51 @@ export class MysqlDriver implements DbDriver {
     }
   }
 
+  private instrument(connection: mysql.Connection): mysql.Connection {
+    const mutable = connection as unknown as {
+      query: (...args: unknown[]) => Promise<unknown>
+      execute: (...args: unknown[]) => Promise<unknown>
+    }
+    for (const method of ['query', 'execute'] as const) {
+      const original = mutable[method].bind(connection)
+      mutable[method] = (...args: unknown[]) => {
+        const source = args[0]
+        const statement = typeof source === 'string'
+          ? source
+          : source && typeof source === 'object' && 'sql' in source
+            ? String((source as { sql: unknown }).sql)
+            : String(source)
+        const parameters = Array.isArray(args[1]) ? args[1] : []
+        return traceExecution({
+          protocol: 'sql', driverType: 'mysql', commandName: method.toUpperCase(),
+          databaseName: this.cfg.database, sensitive: { statement, parameters }
+        }, () => original(...args), (result) => {
+          const raw = Array.isArray(result) ? result[0] : result
+          if (Array.isArray(raw)) return { returnedRows: raw.length }
+          if (raw && typeof raw === 'object' && 'affectedRows' in raw) {
+            return { affectedRows: Number((raw as { affectedRows: unknown }).affectedRows) }
+          }
+          return {}
+        })
+      }
+    }
+    return connection
+  }
+
+  private openConnection(): Promise<mysql.Connection> {
+    return traceExecution({
+      protocol: 'driver', driverType: 'mysql', commandName: 'CONNECT',
+      databaseName: this.cfg.database, sensitive: { command: { action: 'connect' } }
+    }, () => mysql.createConnection(this.options()))
+  }
+
   async connect(): Promise<void> {
     if (this.conn?.state === 'authenticated') return
     // mysql2 在空闲超时/网络断开后会保留 PromiseConnection 对象，但其内部
     // 已进入 closed state；先丢弃该对象，再建立新会话。
     this.conn?.destroy()
     this.conn = null
-    this.conn = await mysql.createConnection(this.options())
+    this.conn = this.instrument(await this.openConnection())
   }
 
   async disconnect(): Promise<void> {
@@ -84,7 +123,7 @@ export class MysqlDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const c = await mysql.createConnection(this.options())
+    const c = this.instrument(await this.openConnection())
     await c.query('SELECT 1')
     await c.end()
   }

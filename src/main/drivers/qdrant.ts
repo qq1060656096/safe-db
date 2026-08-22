@@ -6,6 +6,9 @@ import type {
   DatabaseOperation,
   ForeignKeyInfo,
   IndexInfo,
+  QdrantFilterCondition,
+  QdrantVectorFieldInfo,
+  QdrantVectorQuery,
   QueryResult,
   RoutineInfo,
   SqlKind,
@@ -14,9 +17,34 @@ import type {
 import { classifyQdrantRequest, parseQdrantRequests, type QdrantRequestInput } from '../core/nativeCommand'
 import type { DbDriver, DriverOperationResult, TableDataQuery, TableDataResult } from './base'
 import { capabilitiesForType } from './capabilities'
+import { traceExecution } from '../audit/trace'
 
 type CollectionInfo = Awaited<ReturnType<QdrantClient['getCollection']>>
 type ScrollPoint = Awaited<ReturnType<QdrantClient['scroll']>>['points'][number]
+type PointLike = Pick<ScrollPoint, 'id' | 'payload' | 'vector'> & { score?: number }
+
+function qdrantSdkRequest(name: string, args: unknown[]): {
+  method: string
+  path: string
+  body?: unknown
+} {
+  const collection = typeof args[0] === 'string' ? encodeURIComponent(args[0]) : ''
+  if (name === 'getCollections') return { method: 'GET', path: '/collections' }
+  if (name === 'getCollection') return { method: 'GET', path: `/collections/${collection}` }
+  if (name === 'scroll') return { method: 'POST', path: `/collections/${collection}/points/scroll`, body: args[1] }
+  if (name === 'count') return { method: 'POST', path: `/collections/${collection}/points/count`, body: args[1] }
+  if (name === 'query') return { method: 'POST', path: `/collections/${collection}/points/query`, body: args[1] }
+  return { method: 'SDK', path: `/${name}`, body: args }
+}
+
+function qdrantMetrics(value: unknown): { returnedRows?: number; matchedRows?: number; affectedRows?: number } {
+  if (!value || typeof value !== 'object') return {}
+  const object = value as Record<string, unknown>
+  if (Array.isArray(object.points)) return { returnedRows: object.points.length }
+  if (Array.isArray(object.collections)) return { returnedRows: object.collections.length }
+  if (typeof object.count === 'number') return { matchedRows: object.count }
+  return { returnedRows: 1 }
+}
 
 function jsonValue(value: unknown): string {
   if (value === undefined) return ''
@@ -51,21 +79,63 @@ function parsedFilterValue(value?: string): unknown {
   }
 }
 
-function vectorDescription(info: CollectionInfo): string {
+function vectorFields(info: CollectionInfo): QdrantVectorFieldInfo[] {
   const dense = info.config.params.vectors
-  const denseParts: string[] = []
-  if (dense && 'size' in dense) {
-    denseParts.push(`dense[${dense.size}] ${dense.distance}`)
-  } else if (dense) {
-    for (const [name, params] of Object.entries(dense)) {
-      if (params) denseParts.push(`${name}[${params.size}] ${params.distance}`)
+  const fields: QdrantVectorFieldInfo[] = []
+  const denseRecord = dense as Record<string, unknown> | undefined
+  if (denseRecord && typeof denseRecord.size === 'number' && typeof denseRecord.distance === 'string') {
+    fields.push({ kind: 'dense', size: denseRecord.size, distance: denseRecord.distance })
+  } else if (denseRecord) {
+    for (const [name, value] of Object.entries(denseRecord)) {
+      const params = value as Record<string, unknown> | undefined
+      if (params && typeof params.size === 'number' && typeof params.distance === 'string') {
+        fields.push({ name, kind: 'dense', size: params.size, distance: params.distance })
+      }
     }
   }
-  const sparse = Object.keys(info.config.params.sparse_vectors ?? {}).map((name) => `${name}[sparse]`)
-  return [...denseParts, ...sparse].join(' · ') || 'no vectors'
+  for (const name of Object.keys(info.config.params.sparse_vectors ?? {})) fields.push({ name, kind: 'sparse' })
+  return fields
 }
 
-function qdrantFilter(filters: ColumnFilter[] | undefined): Record<string, unknown> | undefined {
+function vectorDescription(info: CollectionInfo): string {
+  return vectorFields(info).map((field) => field.kind === 'dense'
+    ? `${field.name ? `${field.name}` : 'dense'}[${field.size}] ${field.distance}`
+    : `${field.name}[sparse]`).join(' · ') || 'no vectors'
+}
+
+function parsedFilterArray(value: string | undefined, label: string): unknown[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(value ?? '') }
+  catch { throw new Error(`${label} 必须是有效的 JSON 数组`) }
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error(`${label} 必须是非空 JSON 数组`)
+  return parsed
+}
+
+function nativeFilterCondition(item: QdrantFilterCondition): Record<string, unknown> {
+  const field = item.field.trim()
+  if (!field) throw new Error('Qdrant 筛选字段不能为空')
+  if (field === 'payload' || field === 'vector') throw new Error(`Qdrant ${field} 汇总列不能直接筛选，请输入具体 Payload 路径`)
+  if (field === 'id') {
+    if (item.op === 'match') return { has_id: [qdrantPointId(parsedFilterValue(item.value))] }
+    if (item.op === 'match_any') return { has_id: parsedFilterArray(item.value, 'Qdrant Point ID').map(qdrantPointId) }
+    throw new Error('Qdrant Point ID 只支持等于或属于任意值筛选')
+  }
+  const key = payloadKey(field)
+  if (!key) throw new Error('Qdrant Payload 筛选路径不能为空')
+  if (item.op === 'empty') return { is_empty: { key } }
+  if (item.op === 'null') return { is_null: { key } }
+  if (item.op === 'text') return { key, match: { text: item.value ?? '' } }
+  if (item.op === 'phrase') return { key, match: { phrase: item.value ?? '' } }
+  if (item.op === 'match') return { key, match: { value: parsedFilterValue(item.value) } }
+  if (item.op === 'match_any') return { key, match: { any: parsedFilterArray(item.value, `Qdrant ${field} 筛选值`) } }
+  const rangeKey = item.op === '>' ? 'gt' : item.op === '>=' ? 'gte' : item.op === '<' ? 'lt' : 'lte'
+  return { key, range: { [rangeKey]: parsedFilterValue(item.value) } }
+}
+
+function qdrantFilter(
+  filters: ColumnFilter[] | undefined,
+  nativeFilters: QdrantFilterCondition[] | undefined
+): Record<string, unknown> | undefined {
   const must: Record<string, unknown>[] = []
   const mustNot: Record<string, unknown>[] = []
   for (const item of filters ?? []) {
@@ -89,6 +159,11 @@ function qdrantFilter(filters: ColumnFilter[] | undefined): Record<string, unkno
       const rangeKey = item.op === '>' ? 'gt' : item.op === '>=' ? 'gte' : item.op === '<' ? 'lt' : 'lte'
       target.push({ key, range: { [rangeKey]: parsedFilterValue(item.value) } })
     }
+  }
+  for (const item of nativeFilters ?? []) {
+    const condition = nativeFilterCondition(item)
+    const target = item.clause === 'must_not' ? mustNot : must
+    target.push(condition)
   }
   return must.length || mustNot.length
     ? { ...(must.length ? { must } : {}), ...(mustNot.length ? { must_not: mustNot } : {}) }
@@ -153,6 +228,31 @@ function qdrantPointId(value: unknown): string | number {
   throw new Error('Qdrant Point ID 必须是非负安全整数或 UUID')
 }
 
+function validatedVectorQuery(info: CollectionInfo, query: QdrantVectorQuery): QdrantVectorQuery {
+  if (!Array.isArray(query.vector) || query.vector.length === 0 || query.vector.some((value) => !Number.isFinite(value))) {
+    throw new Error('Qdrant 查询向量必须是由有限数字组成的非空数组')
+  }
+  if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 500) {
+    throw new Error('Qdrant 向量查询返回数量必须在 1 到 500 之间')
+  }
+  if (query.scoreThreshold !== undefined && !Number.isFinite(query.scoreThreshold)) {
+    throw new Error('Qdrant Score 阈值必须是有限数字')
+  }
+  const denseFields = vectorFields(info).filter((field) => field.kind === 'dense')
+  const field = query.using
+    ? denseFields.find((item) => item.name === query.using)
+    : denseFields.find((item) => item.name === undefined)
+  if (!field) {
+    throw new Error(query.using
+      ? `Qdrant Collection 不存在稠密向量字段：${query.using}`
+      : 'Qdrant Collection 没有默认稠密向量，请选择 Named Vector')
+  }
+  if (field.size !== undefined && query.vector.length !== field.size) {
+    throw new Error(`Qdrant 查询向量维度应为 ${field.size}，实际为 ${query.vector.length}`)
+  }
+  return query
+}
+
 function parsedJsonContainer(value: unknown, label: string): unknown[] | Record<string, unknown> {
   let parsed = value
   if (typeof parsed === 'string') {
@@ -198,13 +298,30 @@ export class QdrantDriver implements DbDriver {
   }
 
   private createClient(): QdrantClient {
-    return new QdrantClient({
+    const client = new QdrantClient({
       host: this.cfg.host,
       port: this.cfg.port,
       https: this.cfg.tls === true,
       apiKey: this.cfg.apiKey || undefined,
       timeout: this.cfg.timeoutMs ?? 30_000
     })
+    return new Proxy(client, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target)
+        if (typeof value !== 'function' || typeof property !== 'string') return value
+        return (...args: unknown[]) => {
+          const request = qdrantSdkRequest(property, args)
+          return traceExecution({
+            protocol: 'http', driverType: 'qdrant', commandName: `HTTP ${request.method}`,
+            sensitive: {
+              httpMethod: request.method,
+              requestPath: request.path,
+              ...(request.body === undefined ? {} : { requestBody: request.body })
+            }
+          }, () => value.apply(target, args), qdrantMetrics)
+        }
+      }
+    }) as QdrantClient
   }
 
   private baseUrl(): string {
@@ -258,7 +375,7 @@ export class QdrantDriver implements DbDriver {
     return []
   }
 
-  private columnsFrom(info: CollectionInfo, points: ScrollPoint[]): ColumnInfo[] {
+  private columnsFrom(info: CollectionInfo, points: PointLike[]): ColumnInfo[] {
     const payloadTypes = new Map<string, Set<string>>()
     for (const [name, index] of Object.entries(info.payload_schema)) {
       payloadTypes.set(name, new Set([index?.data_type ?? 'unknown']))
@@ -274,6 +391,12 @@ export class QdrantDriver implements DbDriver {
       name: 'id', dataType: 'uint64 | uuid', nullable: false, isPrimaryKey: true,
       defaultValue: null, ordinal: 0
     }]
+    if (points.some((point) => typeof point.score === 'number')) {
+      columns.push({
+        name: 'score', dataType: 'float', nullable: false, isPrimaryKey: false,
+        defaultValue: null, extra: 'vector similarity', ordinal: columns.length
+      })
+    }
     for (const [name, types] of [...payloadTypes].sort(([left], [right]) => left.localeCompare(right))) {
       columns.push({
         name: payloadColumn(name), dataType: [...types].sort().join(' | '), nullable: true,
@@ -344,13 +467,47 @@ export class QdrantDriver implements DbDriver {
   }
 
   async getTableData(query: TableDataQuery): Promise<TableDataResult> {
-    const filter = qdrantFilter(query.filters)
+    const nativeQuery = query.nativeQuery?.type === 'qdrant' ? query.nativeQuery : undefined
+    const filter = qdrantFilter(query.filters, nativeQuery?.filter)
     const order = query.orderBy?.[0]
     if (order?.column === 'id' && order.direction === 'desc') {
       throw new Error('Qdrant Point 游标只支持按 id 正序浏览')
     }
     if (order?.column === 'payload' || order?.column === 'vector') {
       throw new Error(`Qdrant ${order.column} 汇总列不支持排序，请选择具体 payload 字段`)
+    }
+    const infoPromise = this.client.getCollection(query.table)
+    if (nativeQuery?.vector) {
+      if (order) throw new Error('Qdrant 向量查询固定按相似度排序，不能同时指定字段排序')
+      const info = await infoPromise
+      const vectorQuery = validatedVectorQuery(info, nativeQuery.vector)
+      const result = await this.client.query(query.table, {
+        query: vectorQuery.vector,
+        ...(vectorQuery.using ? { using: vectorQuery.using } : {}),
+        ...(filter ? { filter } : {}),
+        ...(vectorQuery.scoreThreshold === undefined ? {} : { score_threshold: vectorQuery.scoreThreshold }),
+        limit: vectorQuery.limit,
+        with_payload: true,
+        with_vector: query.includeVectors === true
+      })
+      const summary = vectorDescription(info)
+      const rows = result.points.map((point) => ({
+        id: point.id,
+        score: point.score,
+        ...Object.fromEntries(Object.entries(point.payload ?? {}).map(([key, value]) => [payloadColumn(key), value && typeof value === 'object' ? jsonValue(value) : value])),
+        payload: jsonValue(point.payload ?? {}),
+        vector: query.includeVectors ? jsonValue(point.vector) : `<hidden · ${summary}>`
+      }))
+      return {
+        columns: this.columnsFrom(info, result.points),
+        rows,
+        total: rows.length,
+        totalMode: 'returned',
+        editable: true,
+        keyColumns: ['id'],
+        paginationMode: 'none',
+        vectorFields: vectorFields(info)
+      }
     }
     const scrollRequest: NonNullable<Parameters<QdrantClient['scroll']>[1]> = {
       limit: Math.min(500, Math.max(1, query.pageSize)),
@@ -363,7 +520,7 @@ export class QdrantDriver implements DbDriver {
         : {})
     }
     const [info, result, count] = await Promise.all([
-      this.client.getCollection(query.table),
+      infoPromise,
       this.client.scroll(query.table, scrollRequest),
       this.client.count(query.table, { ...(filter ? { filter } : {}), exact: true })
     ])
@@ -381,14 +538,31 @@ export class QdrantDriver implements DbDriver {
       columns: this.columnsFrom(info, result.points),
       rows,
       total: count.count,
+      totalMode: 'exact',
       editable: true,
       keyColumns: ['id'],
       paginationMode: 'cursor',
-      nextCursor
+      nextCursor,
+      vectorFields: vectorFields(info)
     }
   }
 
   private async executeOne(request: QdrantRequestInput): Promise<QueryResult> {
+    const path = new URL(request.path, 'http://safe-db.local')
+    for (const [key, value] of Object.entries(request.query ?? {})) path.searchParams.set(key, String(value))
+    return traceExecution({
+      protocol: 'http', driverType: 'qdrant', commandName: `HTTP ${request.method}`,
+      sensitive: {
+        httpMethod: request.method,
+        requestPath: `${path.pathname}${path.search}`,
+        ...(request.body === undefined ? {} : { requestBody: request.body })
+      }
+    }, () => this.executeOneUntraced(request), (result) => result.kind === 'rows'
+      ? { returnedRows: result.rows?.length ?? 0 }
+      : { affectedRows: result.affectedRows })
+  }
+
+  private async executeOneUntraced(request: QdrantRequestInput): Promise<QueryResult> {
     const controller = new AbortController()
     this.activeController = controller
     const timeout = setTimeout(() => controller.abort(), this.cfg.timeoutMs ?? 30_000)

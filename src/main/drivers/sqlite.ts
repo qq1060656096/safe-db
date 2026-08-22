@@ -14,6 +14,7 @@ import { sanitizeRows, buildWhereClause, type DbDriver, type DriverOperationResu
 import { splitSqlStatements } from '../core/sqlSplit'
 import { capabilitiesForType } from './capabilities'
 import { compileRelationalOperation } from './relationalOperation'
+import { traceExecutionSync } from '../audit/trace'
 
 type SqliteDb = InstanceType<typeof Database>
 
@@ -28,11 +29,53 @@ export class SqliteDriver implements DbDriver {
 
   constructor(private filePath: string) {}
 
+  private instrument(database: SqliteDb): SqliteDb {
+    const mutable = database as unknown as {
+      prepare: (sql: string) => unknown
+      exec: (sql: string) => unknown
+      pragma: (source: string, options?: unknown) => unknown
+    }
+    const originalPrepare = mutable.prepare.bind(database)
+    mutable.prepare = (statement: string) => {
+      const prepared = originalPrepare(statement) as Record<string, unknown>
+      for (const method of ['all', 'get', 'run'] as const) {
+        const candidate = prepared[method]
+        if (typeof candidate !== 'function') continue
+        const original = candidate.bind(prepared) as (...args: unknown[]) => unknown
+        prepared[method] = (...parameters: unknown[]) => traceExecutionSync({
+          protocol: 'sql', driverType: 'sqlite', commandName: method.toUpperCase(),
+          databaseName: 'main', sensitive: { statement, parameters }
+        }, () => original(...parameters), (result) => {
+          if (Array.isArray(result)) return { returnedRows: result.length }
+          if (result && typeof result === 'object' && 'changes' in result) {
+            return { affectedRows: Number((result as { changes: unknown }).changes) }
+          }
+          return result === undefined ? {} : { returnedRows: 1 }
+        })
+      }
+      return prepared
+    }
+    const originalExec = mutable.exec.bind(database)
+    mutable.exec = (statement: string) => traceExecutionSync({
+      protocol: 'sql', driverType: 'sqlite', commandName: 'EXEC', databaseName: 'main',
+      sensitive: { statement, parameters: [] }
+    }, () => originalExec(statement))
+    const originalPragma = mutable.pragma.bind(database)
+    mutable.pragma = (source: string, options?: unknown) => traceExecutionSync({
+      protocol: 'sql', driverType: 'sqlite', commandName: 'PRAGMA', databaseName: 'main',
+      sensitive: { statement: `PRAGMA ${source}`, parameters: [] }
+    }, () => originalPragma(source, options), (result) => ({ returnedRows: Array.isArray(result) ? result.length : null }))
+    return database
+  }
+
   async connect(): Promise<void> {
     if (this.db) return
     // 连接配置只能指向已存在的数据库。新建数据库由保存连接流程显式完成，
     // 避免路径错误时 better-sqlite3 静默创建空文件。
-    this.db = new Database(this.filePath, { fileMustExist: true })
+    this.db = this.instrument(traceExecutionSync({
+      protocol: 'driver', driverType: 'sqlite', commandName: 'OPEN', databaseName: 'main',
+      sensitive: { command: { action: 'open-database' } }
+    }, () => new Database(this.filePath, { fileMustExist: true })))
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
   }
@@ -43,7 +86,10 @@ export class SqliteDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const d = new Database(this.filePath, { readonly: true, fileMustExist: true })
+    const d = this.instrument(traceExecutionSync({
+      protocol: 'driver', driverType: 'sqlite', commandName: 'OPEN', databaseName: 'main',
+      sensitive: { command: { action: 'open-database', readonly: true } }
+    }, () => new Database(this.filePath, { readonly: true, fileMustExist: true })))
     // 读取 schema 才能识别“普通文件伪装成 SQLite”的情况；SELECT 1 不会访问数据库页。
     d.pragma('schema_version', { simple: true })
     d.close()

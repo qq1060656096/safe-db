@@ -10,6 +10,7 @@ export interface WorkspaceLayout {
 
 interface ColumnLayout {
   widths: Record<string, number>
+  order: string[]
   updatedAt: number
 }
 
@@ -71,9 +72,19 @@ function parseColumnLayout(value: unknown): ColumnLayout | undefined {
     const valid = boundedNumber(width, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
     if (valid !== undefined) widths[key] = valid
   }
-  if (!Object.keys(widths).length) return undefined
+  const order: string[] = []
+  const seen = new Set<string>()
+  if (Array.isArray(value.order)) {
+    for (const item of value.order.slice(0, 2_000)) {
+      if (typeof item !== 'string' || !item || item.length > 512 || seen.has(item)) continue
+      seen.add(item)
+      order.push(item)
+    }
+  }
+  if (!Object.keys(widths).length && !order.length) return undefined
   return {
     widths,
+    order,
     updatedAt: typeof value.updatedAt === 'number' && Number.isFinite(value.updatedAt) ? value.updatedAt : 0
   }
 }
@@ -206,6 +217,9 @@ export const useLayoutStore = defineStore('layout', {
     getColumnWidths(scope: string): Record<string, number> {
       return { ...(this.columnLayouts[scope]?.widths ?? {}) }
     },
+    getColumnOrder(scope: string): string[] {
+      return [...(this.columnLayouts[scope]?.order ?? [])]
+    },
     setColumnWidth(scope: string, column: string, width: number): void {
       if (!scope || !column) return
       const next = { ...this.columnLayouts }
@@ -214,6 +228,24 @@ export const useLayoutStore = defineStore('layout', {
           ...(next[scope]?.widths ?? {}),
           [column]: Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, Math.round(width)))
         },
+        order: [...(next[scope]?.order ?? [])],
+        updatedAt: Date.now()
+      }
+      const entries = Object.entries(next)
+      if (entries.length > MAX_COLUMN_LAYOUTS) {
+        entries.sort((left, right) => left[1].updatedAt - right[1].updatedAt)
+        for (const [key] of entries.slice(0, entries.length - MAX_COLUMN_LAYOUTS)) delete next[key]
+      }
+      this.columnLayouts = next
+      this.persist()
+    },
+    setColumnOrder(scope: string, order: string[]): void {
+      if (!scope) return
+      const uniqueOrder = [...new Set(order.filter((column) => column && column.length <= 512))].slice(0, 2_000)
+      const next = { ...this.columnLayouts }
+      next[scope] = {
+        widths: { ...(next[scope]?.widths ?? {}) },
+        order: uniqueOrder,
         updatedAt: Date.now()
       }
       const entries = Object.entries(next)

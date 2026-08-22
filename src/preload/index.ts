@@ -2,10 +2,12 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   Api,
   AgentApprovalRequest,
+  ApprovalLogFilter,
   AuditFilter,
   ConnectionConfig,
   DatabaseOperation,
   ExportOptions,
+  OperationLogFilter,
   SavedQueryInput,
   TableDataQuery
 } from '../shared/types'
@@ -81,6 +83,15 @@ const api: Api = {
 
   // 审计
   queryAudit: (filter: AuditFilter) => ipcRenderer.invoke('audit:query', filter),
+  queryOperationLogs: (filter: OperationLogFilter) => ipcRenderer.invoke('audit:operations', filter),
+  queryApprovalLogs: (filter: ApprovalLogFilter) => ipcRenderer.invoke('audit:approvals', filter),
+  listExecutionTraces: (operationId: string) => ipcRenderer.invoke('audit:executionTraces', operationId),
+  revealExecutionTrace: (id: string) => ipcRenderer.invoke('audit:revealExecutionTrace', id),
+  recordSensitiveAuditAction: (action: 'copy' | 'export', traceId: string) =>
+    ipcRenderer.invoke('audit:sensitiveAction', action, traceId),
+  verifyAuditIntegrity: () => ipcRenderer.invoke('audit:verifyIntegrity'),
+  rotateAuditEncryptionKey: () => ipcRenderer.invoke('audit:rotateKey'),
+  purgeAuditLogs: (retentionDays: number) => ipcRenderer.invoke('audit:purge', retentionDays),
 
   // 导出
   exportData: (opts: ExportOptions) => ipcRenderer.invoke('export:save', opts)

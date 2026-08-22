@@ -1,8 +1,11 @@
 /* 审批弹窗 + 审计页面 端到端验证 */
+import { unlink } from 'node:fs/promises'
 async function getPageWs() {
-  const res = await fetch('http://localhost:9222/json/list')
+  const port = process.env.E2E_CDP_PORT ?? '9222'
+  const res = await fetch(`http://localhost:${port}/json/list`)
   const targets = await res.json()
-  const page = targets.find((t) => t.type === 'page' && t.url.startsWith('http://localhost:5173'))
+  const prefix = process.env.E2E_PAGE_PREFIX
+  const page = targets.find((t) => t.type === 'page' && (!prefix || t.url.startsWith(prefix)))
   if (!page) throw new Error('找不到页面')
   return page.webSocketDebuggerUrl
 }
@@ -73,19 +76,33 @@ async function main() {
   console.log('== 准备:审批模式连接 ==')
   // 只清理本测试创建的连接(按名字匹配),绝不动用户自己的连接
   const TEST_CONN_NAMES = ['审批库', '只读库']
+  const TEST_DB_NAME = `safe-db-e2e-approval-${process.pid}.db`
   const conns = await evalJs('window.api.listConnections()')
-  for (const c of conns) {
-    if (TEST_CONN_NAMES.includes(c.name)) await evalJs(`window.api.deleteConnection(${JSON.stringify(c.id)})`)
+  const staleTestConnections = conns.filter((connection) => TEST_CONN_NAMES.includes(connection.name))
+  for (const connection of staleTestConnections) {
+    await evalJs(`window.api.deleteConnection(${JSON.stringify(connection.id)})`)
+    if (/^\/tmp\/safe-db-e2e-approval-\d+\.db$/.test(connection.filePath ?? '')) {
+      await unlink(connection.filePath).catch(() => {})
+    }
+  }
+  if (process.argv.includes('--cleanup-only')) {
+    console.log('== 测试连接已清理 ==')
+    ws.close()
+    return
   }
   const conn = await evalJs(
-    `window.api.saveConnection({ id: '', name: '审批库', type: 'sqlite', permissionMode: 'approval', filePath: '/tmp/jjtest.db' })`
+    `window.api.saveConnection({ id: '', name: '审批库', type: 'sqlite', permissionMode: 'approval', sqliteCreate: { directory: '/tmp', databaseName: ${JSON.stringify(TEST_DB_NAME)} } })`
   )
   await evalJs(`window.__store.getState().loadConnections()`)
   await evalJs(`window.api.connect(${JSON.stringify(conn.id)})`)
-  // 幂等清理
-  await evalJs(`window.api.executeSql(${JSON.stringify(conn.id)}, "UPDATE users SET age = 28 WHERE id = 1")`).then(async (r) => {
-    if (r?.status === 'needsApproval') await evalJs(`window.api.confirmExecute(${JSON.stringify(r.approvalToken)})`)
-  })
+  for (const sql of [
+    'CREATE TABLE users (id INTEGER PRIMARY KEY, age INTEGER NOT NULL)',
+    'INSERT INTO users (id, age) VALUES (1, 28), (2, 35), (3, 42)'
+  ]) {
+    await evalJs(`window.api.executeSql(${JSON.stringify(conn.id)}, ${JSON.stringify(sql)})`).then(async (r) => {
+      if (r?.status === 'needsApproval') await evalJs(`window.api.confirmExecute(${JSON.stringify(r.approvalToken)})`)
+    })
+  }
 
   console.log('== 1. 审批弹窗:确认执行 ==')
   await evalJs(`window.__store.getState().openTab({ type: 'query', title: '审批查询', connectionId: ${JSON.stringify(conn.id)}, database: 'main' })`)
@@ -125,16 +142,17 @@ async function main() {
 
   console.log('== 3. 审计页面 ==')
   await evalJs(`window.__store.getState().openTab({ type: 'audit', title: '审计日志' })`)
-  check('审计页渲染', await waitFor(`document.body.innerText.includes('语句类型')`))
-  check('含「审批通过」记录', await waitFor(`document.body.innerText.includes('审批通过')`))
-  check('含「审批拒绝」记录', await waitFor(`document.body.innerText.includes('审批拒绝')`))
+  check('双日志页渲染', await waitFor(`document.body.innerText.includes('操作日志') && document.body.innerText.includes('审批日志')`))
+  await evalJs(`[...document.querySelectorAll('.audit-page .n-tabs-tab')].find(el => el.innerText.includes('审批日志'))?.click()`)
+  check('含「已通过」审批事件', await waitFor(`document.body.innerText.includes('已通过')`))
+  check('含「已拒绝」审批事件', await waitFor(`document.body.innerText.includes('已拒绝')`))
   // 展开所有行查看完整 SQL
   await evalJs(`[...document.querySelectorAll('.audit-page .n-data-table-expand-trigger')].forEach(el => el.click())`)
   check('含 UPDATE 语句', await waitFor(`document.body.innerText.includes('UPDATE users SET age = 88')`))
 
   console.log('== 4. 只读模式 UI 拦截提示 ==')
   const ro = await evalJs(
-    `window.api.saveConnection({ id: '', name: '只读库', type: 'sqlite', permissionMode: 'readonly', filePath: '/tmp/jjtest.db' })`
+    `window.api.saveConnection({ id: '', name: '只读库', type: 'sqlite', permissionMode: 'readonly', filePath: ${JSON.stringify(conn.filePath)} })`
   )
   await evalJs(`window.__store.getState().loadConnections()`)
   await evalJs(`window.api.connect(${JSON.stringify(ro.id)})`)
@@ -161,6 +179,7 @@ async function main() {
   // 只关闭本测试打开的标签页,保留用户的标签页
   await evalJs(`(() => { const s = window.__store.getState(); const mine = ['审批查询','审计日志','只读查询']; s.tabs.filter(t => mine.includes(t.title)).forEach(t => s.closeTab(t.id)) })()`)
   for (const c of [conn, ro]) await evalJs(`window.api.deleteConnection(${JSON.stringify(c.id)})`)
+  await unlink(conn.filePath).catch(() => {})
   await evalJs(`window.__store.getState().loadConnections()`)
   console.log(process.exitCode ? '== 存在失败项 ==' : '== 全部通过 ==')
   ws.close()

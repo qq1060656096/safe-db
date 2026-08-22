@@ -4,6 +4,7 @@ import { ColumnWidthOutlined, CopyOutlined, DownloadOutlined } from '@vicons/ant
 import { NButton, NDataTable, NDropdown, NIcon, NTag, NText, useMessage, type DataTableBaseColumn, type DataTableColumns, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { DbType, QueryResult } from '../../../shared/types'
+import { useColumnOrder } from '../columnOrder'
 import { useContextMenuDismiss } from '../contextMenu'
 import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, queryColumnLayoutScope, useLayoutStore } from '../stores/layout'
 import { toCsv, toJson } from '../utils'
@@ -39,15 +40,21 @@ useContextMenuDismiss(() => {
 })
 const selectedColumnSet = new Set<string>()
 const rows = computed(() => (props.result.rows ?? []).map((row, index) => ({ ...row, __resultKey: index })))
-const columnNames = computed(() => (props.result.columns ?? []).map((column) => column.name))
+const sourceColumnNames = computed(() => (props.result.columns ?? []).map((column) => column.name))
 const columnLayoutScope = computed(() => queryColumnLayoutScope({
   connectionId: props.connectionId,
   database: props.database,
   savedQueryId: props.savedQueryId,
   sql: props.sql,
   resultIndex: props.index,
-  columns: columnNames.value
+  columns: sourceColumnNames.value
 }))
+const {
+  orderedColumns: columnNames,
+  suppressColumnClick,
+  columnDragProps,
+  columnDragClass
+} = useColumnOrder(sourceColumnNames, columnLayoutScope)
 const columnWidths = ref<Record<string, number>>({})
 const tableInstanceKey = ref(0)
 const tableScrollX = computed(() => 104 + columnNames.value.reduce((total, name) => total + (columnWidths.value[name] ?? DEFAULT_COLUMN_WIDTH), 0))
@@ -66,26 +73,31 @@ const columns = computed<DataTableColumns<Record<string, unknown>>>(() =>
       render: (row: Record<string, unknown>) => h('span', { class: 'table-row-number' }, Number(row.__resultKey) + 1)
     },
     { type: 'selection', fixed: 'left' as const },
-    ...(props.result.columns ?? []).map((column) => ({
-      title: () => h('span', {
-        class: 'result-column-header',
-        title: `${column.name}\n${t('query.columnSelectionHelp')}`
-      }, column.name),
-      key: column.name,
-      width: columnWidths.value[column.name] ?? DEFAULT_COLUMN_WIDTH,
-      minWidth: MIN_COLUMN_WIDTH,
-      maxWidth: MAX_COLUMN_WIDTH,
-      resizable: true,
-      className: 'copyable-data-column',
-      cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
-      ellipsis: { tooltip: true },
-      render: (row: Record<string, unknown>) => h('span', {
-        class: 'result-cell-value',
-        onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', row[column.name])
-      }, row[column.name] === null
-        ? [h(NText, { depth: 3 }, { default: () => t('common.nullValue') })]
-        : String(row[column.name] ?? ''))
-    }))
+    ...columnNames.value.flatMap((name) => {
+      const column = (props.result.columns ?? []).find((item) => item.name === name)
+      if (!column) return []
+      return [{
+        title: () => h('span', {
+          ...columnDragProps(column.name),
+          class: ['result-column-header', 'draggable-column-header', columnDragClass(column.name)],
+          title: `${column.name}\n${t('query.columnSelectionHelp')}`
+        }, column.name),
+        key: column.name,
+        width: columnWidths.value[column.name] ?? DEFAULT_COLUMN_WIDTH,
+        minWidth: MIN_COLUMN_WIDTH,
+        maxWidth: MAX_COLUMN_WIDTH,
+        resizable: true,
+        className: 'copyable-data-column',
+        cellProps: () => ({ class: selectedColumnSet.has(column.name) ? 'data-column-selected' : undefined }),
+        ellipsis: { tooltip: true },
+        render: (row: Record<string, unknown>) => h('span', {
+          class: 'result-cell-value',
+          onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', row[column.name])
+        }, row[column.name] === null
+          ? [h(NText, { depth: 3 }, { default: () => t('common.nullValue') })]
+          : String(row[column.name] ?? ''))
+      }]
+    })
   ]
 )
 const exportOptions = computed(() => [
@@ -215,6 +227,7 @@ function openColumnMenu(event: MouseEvent, column: string, kind: 'header' | 'cel
 function selectColumnFromHeader(event: MouseEvent): void {
   if (!(event.target instanceof Element)) return
   if (event.target.closest('[data-data-table-resizable]')) return
+  if (suppressColumnClick.value) { event.preventDefault(); event.stopPropagation(); return }
   const header = event.target.closest('.n-data-table-th[data-col-key]') as HTMLElement | null
   const column = header?.dataset.colKey
   if (!header || !column || !tableRoot.value?.contains(header) || !columnNames.value.includes(column)) return
@@ -232,7 +245,7 @@ function updateColumnWidth(
   layoutStore.setColumnWidth(columnLayoutScope.value, key, limitedWidth)
 }
 
-function resetColumnWidths(): void {
+function resetColumnLayout(): void {
   layoutStore.resetColumnLayout(columnLayoutScope.value)
   message.success(t('layout.columnsReset'))
 }
@@ -472,7 +485,8 @@ async function copyResult(kind: string | number): Promise<void> {
 async function exportResult(format: string): Promise<void> {
   const sourceRows = props.result.rows ?? []
   try {
-    const content = format === 'csv' ? toCsv(columnNames.value, sourceRows) : toJson(sourceRows)
+    const projected = sourceRows.map((row) => Object.fromEntries(columnNames.value.map((column) => [column, row[column]])))
+    const content = format === 'csv' ? toCsv(columnNames.value, projected) : toJson(projected)
     const path = await window.api.exportData({
       defaultName: `result-${props.index + 1}.${format}`,
       content,
@@ -504,7 +518,7 @@ async function exportResult(format: string): Promise<void> {
           <template #icon><NIcon><DownloadOutlined /></NIcon></template>
         </NButton>
       </NDropdown>
-      <NButton quaternary size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnWidths">
+      <NButton quaternary size="small" :title="t('layout.resetColumns')" :aria-label="t('layout.resetColumns')" @click="resetColumnLayout">
         <template #icon><NIcon><ColumnWidthOutlined /></NIcon></template>
       </NButton>
     </div>

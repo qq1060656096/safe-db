@@ -18,6 +18,7 @@
     "test:native": "node scripts/test-native-classify.mjs",
     "test:qdrant": "node scripts/test-qdrant-driver.mjs",
     "test:operations": "ELECTRON_RUN_AS_NODE=1 electron scripts/test-structured-operations.mjs",
+    "test:audit": "ELECTRON_RUN_AS_NODE=1 electron scripts/test-audit-store.mjs",
     "test:drivers": "node scripts/test-all-driver-operations.mjs",
     "test:agent": "node scripts/test-agent-service.mjs",
     "test:cli": "node scripts/test-cli-output.mjs",

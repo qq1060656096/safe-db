@@ -12,12 +12,76 @@ import type {
 import { classifyRedisCommand, parseRedisCommands, type RedisCommandInput } from '../core/nativeCommand'
 import type { DbDriver, DriverOperationResult, TableDataQuery, TableDataResult } from './base'
 import { capabilitiesForType } from './capabilities'
+import { traceExecution } from '../audit/trace'
 
 function newRedisClient(url: string, database: number) {
   return createClient({ url, database })
 }
 
 type RedisClient = ReturnType<typeof newRedisClient>
+
+const REDIS_WRITE_COMMANDS = new Set([
+  'SET', 'DEL', 'HSET', 'HDEL', 'LPUSH', 'RPUSH', 'LSET', 'LREM', 'SADD', 'SREM',
+  'ZADD', 'ZREM', 'XADD', 'XDEL', 'RESTORE', 'EXPIRE', 'PEXPIRE', 'EVAL'
+])
+
+function redisMetrics(commandName: string, result: unknown): { returnedRows?: number; affectedRows?: number } {
+  if (REDIS_WRITE_COMMANDS.has(commandName)) {
+    return { affectedRows: typeof result === 'number' || typeof result === 'bigint' ? Number(result) : result === null ? 0 : 1 }
+  }
+  if (Array.isArray(result)) return { returnedRows: result.length }
+  if (result && typeof result === 'object') return { returnedRows: Object.keys(result).length }
+  return { returnedRows: result === null || result === undefined ? 0 : 1 }
+}
+
+function traceRedisMulti(multi: object, database: number): object {
+  const commands: unknown[][] = []
+  let proxy: object
+  proxy = new Proxy(multi, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      if (typeof value !== 'function' || typeof property !== 'string') return value
+      if (property === 'exec' || property === 'execAsPipeline') {
+        return (...args: unknown[]) => traceExecution({
+          protocol: 'redis', driverType: 'redis',
+          commandName: property === 'exec' ? 'MULTI' : 'PIPELINE', databaseName: String(database),
+          sensitive: { command: commands }
+        }, () => value.apply(target, args), (result) => ({ returnedRows: Array.isArray(result) ? result.length : null }))
+      }
+      return (...args: unknown[]) => {
+        const command = property === 'sendCommand' && Array.isArray(args[0])
+          ? args[0] as unknown[]
+          : [property.toUpperCase(), ...args]
+        commands.push(command)
+        value.apply(target, args)
+        return proxy
+      }
+    }
+  })
+  return proxy
+}
+
+function traceRedisClient(client: RedisClient, database: number): RedisClient {
+  const excluded = new Set(['on', 'connect', 'close', 'destroy', 'quit', 'duplicate'])
+  return new Proxy(client, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      if (typeof value !== 'function' || typeof property !== 'string') return value
+      if (excluded.has(property)) return value.bind(target)
+      if (property === 'multi') return (...args: unknown[]) => traceRedisMulti(value.apply(target, args), database)
+      return (...args: unknown[]) => {
+        const command = property === 'sendCommand' && Array.isArray(args[0])
+          ? args[0] as unknown[]
+          : [property.toUpperCase(), ...args]
+        const commandName = String(command[0] ?? property).toUpperCase()
+        return traceExecution({
+          protocol: 'redis', driverType: 'redis', commandName, databaseName: String(database),
+          sensitive: { command }
+        }, () => value.apply(target, args), (result) => redisMetrics(commandName, result))
+      }
+    }
+  }) as RedisClient
+}
 
 const FORBIDDEN_COMMANDS = new Set([
   'AUTH', 'CLIENT', 'CLUSTER', 'DISCARD', 'EXEC', 'HELLO', 'MONITOR', 'MULTI', 'PSYNC', 'QUIT',
@@ -107,9 +171,12 @@ export class RedisDriver implements DbDriver {
     const existing = this.clients.get(db)
     if (existing?.isReady) return existing
     if (existing) await existing.close().catch(() => {})
-    const client = newRedisClient(this.url(), db)
+    const client = traceRedisClient(newRedisClient(this.url(), db), db)
     client.on('error', () => {})
-    await client.connect()
+    await traceExecution({
+      protocol: 'driver', driverType: 'redis', commandName: 'CONNECT', databaseName: String(db),
+      sensitive: { command: { action: 'connect' } }
+    }, () => client.connect())
     this.clients.set(db, client)
     return client
   }
@@ -130,10 +197,14 @@ export class RedisDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const client = newRedisClient(this.url(), databaseNumber(this.cfg.database))
+    const database = databaseNumber(this.cfg.database)
+    const client = traceRedisClient(newRedisClient(this.url(), database), database)
     client.on('error', () => {})
     try {
-      await client.connect()
+      await traceExecution({
+        protocol: 'driver', driverType: 'redis', commandName: 'CONNECT', databaseName: String(database),
+        sensitive: { command: { action: 'connect' } }
+      }, () => client.connect())
       await client.ping()
     } finally {
       await client.close().catch(() => {})

@@ -25,12 +25,14 @@ import {
   relationalTable,
   type ParameterizedCommand
 } from './relationalOperation'
+import { traceExecution } from '../audit/trace'
 
 function quoteIdent(name: string): string {
   return `[${name.replace(/]/g, ']]')}]`
 }
 
 type QueryOutput = IResult<unknown>
+const tracedRequest = Symbol('safeDbTracedRequest')
 
 export class SqlServerDriver implements DbDriver {
   readonly capabilities = capabilitiesForType('sqlserver')
@@ -71,12 +73,54 @@ export class SqlServerDriver implements DbDriver {
     return database || this.cfg.database || 'master'
   }
 
+  private instrumentRequest(request: sql.Request, database?: string): sql.Request {
+    const mutable = request as unknown as {
+      [tracedRequest]?: boolean
+      query: (command: string) => Promise<QueryOutput>
+      parameters?: Record<string, { value?: unknown; type?: unknown }>
+    }
+    if (mutable[tracedRequest]) return request
+    mutable[tracedRequest] = true
+    const original = mutable.query.bind(request)
+    mutable.query = (statement: string) => {
+      const parameters = Object.entries(mutable.parameters ?? {}).map(([name, value]) => ({
+        name, type: String(value.type ?? ''), value: value.value
+      }))
+      return traceExecution({
+        protocol: 'sql', driverType: 'sqlserver', commandName: 'QUERY',
+        databaseName: database ?? this.cfg.database ?? 'master',
+        sensitive: { statement, parameters }
+      }, () => original(statement), (result) => ({
+        returnedRows: (result.recordsets ?? []).reduce((sum, rows) => sum + rows.length, 0),
+        affectedRows: (result.rowsAffected ?? []).reduce((sum, count) => sum + count, 0)
+      }))
+    }
+    return request
+  }
+
+  private instrumentPool(pool: sql.ConnectionPool, database?: string): sql.ConnectionPool {
+    const mutable = pool as unknown as { request: () => sql.Request; __safeDbTraced?: boolean }
+    if (mutable.__safeDbTraced) return pool
+    mutable.__safeDbTraced = true
+    const original = mutable.request.bind(pool)
+    mutable.request = () => this.instrumentRequest(original(), database)
+    return pool
+  }
+
+  private connectPool(database?: string): Promise<sql.ConnectionPool> {
+    const name = this.poolKey(database)
+    return traceExecution({
+      protocol: 'driver', driverType: 'sqlserver', commandName: 'CONNECT', databaseName: name,
+      sensitive: { command: { action: 'connect' } }
+    }, () => new sql.ConnectionPool(this.config(name)).connect())
+  }
+
   private async poolFor(database?: string): Promise<sql.ConnectionPool> {
     const key = this.poolKey(database)
     const existing = this.pools.get(key)
     if (existing?.connected) return existing
     if (existing) await existing.close().catch(() => {})
-    const pool = await new sql.ConnectionPool(this.config(key)).connect()
+    const pool = this.instrumentPool(await this.connectPool(key), key)
     this.pools.set(key, pool)
     return pool
   }
@@ -96,7 +140,7 @@ export class SqlServerDriver implements DbDriver {
   }
 
   async test(): Promise<void> {
-    const pool = await new sql.ConnectionPool(this.config()).connect()
+    const pool = this.instrumentPool(await this.connectPool(), this.poolKey())
     try {
       await pool.request().query('SELECT 1 AS ok')
     } finally {
@@ -400,7 +444,7 @@ export class SqlServerDriver implements DbDriver {
   private async runRequest(request: sql.Request, command: string): Promise<QueryOutput> {
     this.activeRequests.add(request)
     try {
-      return await request.query(command)
+      return await this.instrumentRequest(request).query(command)
     } finally {
       this.activeRequests.delete(request)
     }

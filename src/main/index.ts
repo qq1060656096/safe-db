@@ -4,6 +4,7 @@ import { DriverManager } from './drivers/manager'
 import { Executor } from './core/executor'
 import { registerIpcHandlers } from './ipc'
 import { AuditStore } from './store/audit'
+import { configureExecutionTraceRecorder } from './audit/trace'
 import { ConnectionStore } from './store/connections'
 import { QueryStore } from './store/queries'
 import { WindowStateStore, type WindowBounds } from './store/windowState'
@@ -253,6 +254,7 @@ if (!gotLock) {
     const connections = new ConnectionStore()
     const queries = new QueryStore()
     const audit = new AuditStore()
+    configureExecutionTraceRecorder(audit)
     drivers = new DriverManager((id) => connections.get(id))
     const executor = new Executor(connections, drivers, audit)
     executor.onMetadataChanged((connectionId) => {

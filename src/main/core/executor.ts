@@ -6,8 +6,11 @@ import type { ConnectionStore } from '../store/connections'
 import { classifyDatabaseInput } from './nativeCommand'
 import { decide } from './permission'
 import { assertDatabaseOperation, databaseOperationKind, databaseOperationPreview, operationSupports } from './databaseOperation'
+import { currentOperationId, runWithOperationContext } from '../audit/trace'
 
 interface PendingApproval {
+  /** 审计关联 ID 与可执行 token 分离，审批日志绝不能泄露可执行凭证。 */
+  approvalId: string
   connectionId: string
   sql: string
   database?: string
@@ -41,7 +44,40 @@ export class Executor {
   private gcPending(): void {
     const now = Date.now()
     for (const [token, p] of this.pending) {
-      if (now - p.createdAt > APPROVAL_TTL_MS) this.pending.delete(token)
+      if (now - p.createdAt > APPROVAL_TTL_MS) {
+        this.pending.delete(token)
+        this.recordApproval(p, 'expired', '审批已过期')
+      }
+    }
+  }
+
+  private recordApproval(
+    pending: PendingApproval,
+    action: 'requested' | 'approved' | 'rejected' | 'expired',
+    message?: string
+  ): void {
+    const cfg = this.connections.get(pending.connectionId)
+    this.audit.recordApproval({
+      approvalId: pending.approvalId,
+      action,
+      connectionId: pending.connectionId,
+      connectionName: cfg?.name ?? '?',
+      connectionType: cfg?.type ?? null,
+      databaseName: pending.database ?? cfg?.database,
+      sqlText: pending.sql,
+      sqlKind: pending.sqlKind,
+      permissionMode: cfg?.permissionMode ?? 'approval',
+      message
+    })
+  }
+
+  private addPendingApproval(token: string, pending: PendingApproval): void {
+    this.pending.set(token, pending)
+    try {
+      this.recordApproval(pending, 'requested')
+    } catch (error) {
+      this.pending.delete(token)
+      throw error
     }
   }
 
@@ -64,6 +100,9 @@ export class Executor {
   }
 
   async execute(connectionId: string, sql: string, database?: string): Promise<ExecuteResponse> {
+    if (!currentOperationId()) {
+      return runWithOperationContext(randomUUID(), () => this.execute(connectionId, sql, database))
+    }
     const cfg = this.connections.get(connectionId)
     if (!cfg) return { status: 'error', error: '连接不存在' }
     if (!sql.trim()) return { status: 'ok', results: [] }
@@ -96,7 +135,8 @@ export class Executor {
     if (decision === 'needsApproval') {
       this.gcPending()
       const token = randomUUID()
-      this.pending.set(token, { connectionId, sql, database, sqlKind: kind, createdAt: Date.now() })
+      const pending = { approvalId: randomUUID(), connectionId, sql, database, sqlKind: kind, createdAt: Date.now() }
+      this.addPendingApproval(token, pending)
       return { status: 'needsApproval', sqlKind: kind, approvalToken: token }
     }
 
@@ -105,6 +145,9 @@ export class Executor {
 
   /** 结构化操作与原生 SQL/REST 共用权限、审批、审计和元数据失效链路。 */
   async executeOperation(connectionId: string, input: unknown): Promise<ExecuteResponse> {
+    if (!currentOperationId()) {
+      return runWithOperationContext(randomUUID(), () => this.executeOperation(connectionId, input))
+    }
     const cfg = this.connections.get(connectionId)
     if (!cfg) return { status: 'error', error: '连接不存在' }
     let operation: DatabaseOperation
@@ -137,8 +180,8 @@ export class Executor {
     if (decision === 'needsApproval') {
       this.gcPending()
       const token = randomUUID()
-      this.pending.set(token, {
-        connectionId, sql: preview, database, sqlKind: kind, createdAt: Date.now(), operation
+      this.addPendingApproval(token, {
+        approvalId: randomUUID(), connectionId, sql: preview, database, sqlKind: kind, createdAt: Date.now(), operation
       })
       return { status: 'needsApproval', sqlKind: kind, approvalToken: token, preview }
     }
@@ -146,25 +189,46 @@ export class Executor {
   }
 
   async confirmExecute(token: string): Promise<ExecuteResponse> {
+    if (!currentOperationId()) {
+      return runWithOperationContext(randomUUID(), () => this.confirmExecute(token))
+    }
     const p = this.pending.get(token)
     this.pending.delete(token) // 一次性,无论成败都消费掉
+    if (p && Date.now() - p.createdAt > APPROVAL_TTL_MS) {
+      this.recordApproval(p, 'expired', '审批已过期')
+      const response: ExecuteResponse = { status: 'error', error: '审批已过期,请重新执行' }
+      this.emitApprovalResolved(token, response)
+      return response
+    }
     if (!p) {
       const response: ExecuteResponse = { status: 'error', error: '审批已过期或已被处理,请重新执行' }
       this.emitApprovalResolved(token, response)
       return response
     }
+    this.recordApproval(p, 'approved')
     const response = p.operation
-      ? await this.doExecuteOperation(p.connectionId, p.operation, p.sqlKind, 'approved')
-      : await this.doExecute(p.connectionId, p.sql, p.database, p.sqlKind, 'approved')
+      ? await this.doExecuteOperation(p.connectionId, p.operation, p.sqlKind, 'approved', p.approvalId)
+      : await this.doExecute(p.connectionId, p.sql, p.database, p.sqlKind, 'approved', p.approvalId)
     this.emitApprovalResolved(token, response)
     return response
   }
 
   async rejectExecute(token: string): Promise<void> {
+    if (!currentOperationId()) {
+      return runWithOperationContext(randomUUID(), () => this.rejectExecute(token))
+    }
     const p = this.pending.get(token)
     this.pending.delete(token)
     if (!p) return
+    if (Date.now() - p.createdAt > APPROVAL_TTL_MS) {
+      this.recordApproval(p, 'expired', '审批已过期')
+      this.emitApprovalResolved(token, {
+        status: 'denied', sqlKind: p.sqlKind, error: '审批已过期'
+      })
+      return
+    }
     const cfg = this.connections.get(p.connectionId)
+    this.recordApproval(p, 'rejected', '用户拒绝了审批')
     this.audit.insert({
       connectionId: p.connectionId,
       connectionName: cfg?.name ?? '?',
@@ -174,6 +238,7 @@ export class Executor {
       sqlKind: p.sqlKind,
       permissionMode: cfg?.permissionMode ?? 'approval',
       approvalStatus: 'rejected',
+      approvalId: p.approvalId,
       status: 'blocked',
       error: '用户取消了审批',
       durationMs: 0
@@ -190,7 +255,8 @@ export class Executor {
     sql: string,
     database: string | undefined,
     kind: SqlKind,
-    approvalStatus: 'not_required' | 'approved'
+    approvalStatus: 'not_required' | 'approved',
+    approvalId?: string
   ): Promise<ExecuteResponse> {
     const cfg = this.connections.get(connectionId)
     if (!cfg) return { status: 'error', error: '连接不存在' }
@@ -224,6 +290,7 @@ export class Executor {
         sqlKind: kind,
         permissionMode: cfg.permissionMode,
         approvalStatus,
+        approvalId,
         status: 'success',
         affectedRows: isWrite ? affectedRows : null,
         durationMs
@@ -246,6 +313,7 @@ export class Executor {
         sqlKind: kind,
         permissionMode: cfg.permissionMode,
         approvalStatus,
+        approvalId,
         status: 'error',
         error: message,
         durationMs
@@ -258,7 +326,8 @@ export class Executor {
     connectionId: string,
     operation: DatabaseOperation,
     kind: SqlKind,
-    approvalStatus: 'not_required' | 'approved'
+    approvalStatus: 'not_required' | 'approved',
+    approvalId?: string
   ): Promise<ExecuteResponse> {
     const cfg = this.connections.get(connectionId)
     if (!cfg) return { status: 'error', error: '连接不存在' }
@@ -277,6 +346,7 @@ export class Executor {
         connectionId, connectionName: cfg.name, connectionType: cfg.type,
         databaseName: database ?? cfg.database, sqlText: preview, sqlKind: kind,
         permissionMode: cfg.permissionMode, approvalStatus, status: 'success',
+        approvalId,
         affectedRows, durationMs
       })
       if (kind === 'DDL' || (kind === 'WRITE' && driver.capabilities.recordModel !== 'row')) {
@@ -294,6 +364,7 @@ export class Executor {
         connectionId, connectionName: cfg.name, connectionType: cfg.type,
         databaseName: database ?? cfg.database, sqlText: preview, sqlKind: kind,
         permissionMode: cfg.permissionMode, approvalStatus, status: 'error', error: message,
+        approvalId,
         durationMs
       })
       return { status: 'error', error: message, sqlKind: kind, durationMs, preview }

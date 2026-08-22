@@ -80,6 +80,7 @@ try {
   assert.match(preview, /omittedMutations/)
 
   const auditRows = []
+  const approvalRows = []
   let executed = 0
   const configs = {
     approval: { id: 'approval', name: 'approval', type: 'sqlite', permissionMode: 'approval' },
@@ -97,17 +98,33 @@ try {
         }
       })
     },
-    { insert: (row) => auditRows.push(row) }
+    {
+      insert: (row) => auditRows.push(row),
+      recordApproval: (row) => approvalRows.push(row)
+    }
   )
   const approval = await executor.executeOperation('approval', {
     kind: 'records.clear', target: { kind: 'table', database: 'main', name: 'items' }
   })
   assert.equal(approval.status, 'needsApproval')
+  assert.equal(approvalRows.at(-1).action, 'requested')
+  const approvedAuditId = approvalRows.at(-1).approvalId
+  assert.notEqual(approvedAuditId, approval.approvalToken)
   assert.equal(executed, 0)
   const approved = await executor.confirmExecute(approval.approvalToken)
   assert.equal(approved.status, 'ok')
   assert.equal(approved.atomicity, 'transaction')
+  assert.equal(approvalRows.at(-1).action, 'approved')
   assert.equal(executed, 1)
+  assert.equal(auditRows.at(-1).approvalId, approvedAuditId)
+  const rejectedApproval = await executor.executeOperation('approval', {
+    kind: 'records.clear', target: { kind: 'table', database: 'main', name: 'items' }
+  })
+  const rejectedAuditId = approvalRows.at(-1).approvalId
+  await executor.rejectExecute(rejectedApproval.approvalToken)
+  assert.equal(approvalRows.at(-1).action, 'rejected')
+  assert.equal(auditRows.at(-1).approvalId, rejectedAuditId)
+  assert.equal(auditRows.at(-1).status, 'blocked')
   const denied = await executor.executeOperation('readonly', {
     kind: 'records.clear', target: { kind: 'table', database: 'main', name: 'items' }
   })

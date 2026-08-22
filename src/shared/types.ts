@@ -314,6 +314,130 @@ export interface AgentApprovalRequest {
 
 export type ApprovalStatus = 'not_required' | 'approved' | 'rejected'
 
+/** 操作日志与审批日志逻辑隔离，但可通过 approvalId 关联。 */
+export type OperationCategory = 'connection' | 'metadata' | 'data' | 'query' | 'configuration' | 'export' | 'system'
+export type OperationLogStatus = 'success' | 'error' | 'blocked' | 'canceled'
+export type ApprovalLogAction = 'requested' | 'approved' | 'rejected' | 'expired'
+
+export interface OperationLogEntry {
+  id: number
+  eventId: string
+  category: OperationCategory
+  action: string
+  connectionId: string | null
+  connectionName: string | null
+  connectionType: DbType | null
+  databaseName: string | null
+  targetType: string | null
+  targetId: string | null
+  targetName: string | null
+  summary: string
+  sqlText: string | null
+  sqlKind: SqlKind | null
+  permissionMode: PermissionMode | null
+  approvalId: string | null
+  status: OperationLogStatus
+  affectedRows: number | null
+  error: string | null
+  durationMs: number
+  details: Record<string, unknown> | null
+  occurredAt: string
+}
+
+export interface OperationLogFilter {
+  connectionId?: string
+  category?: OperationCategory
+  status?: OperationLogStatus
+  keyword?: string
+  page: number
+  pageSize: number
+}
+
+export interface OperationLogPage {
+  rows: OperationLogEntry[]
+  total: number
+}
+
+export type ExecutionProtocol = 'sql' | 'mongodb' | 'redis' | 'http' | 'driver'
+export type ExecutionTraceStatus = 'success' | 'error' | 'canceled' | 'timeout'
+
+/** 不含敏感请求内容，可安全用于日志列表。 */
+export interface ExecutionTraceSummary {
+  id: string
+  operationId: string
+  spanId: string
+  parentSpanId: string | null
+  sequence: number
+  attempt: number
+  protocol: ExecutionProtocol
+  driverType: string
+  commandName: string
+  databaseName: string | null
+  status: ExecutionTraceStatus
+  returnedRows: number | null
+  matchedRows: number | null
+  affectedRows: number | null
+  responseBytes: number | null
+  errorCode: string | null
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  keyId: string
+  contentHash: string
+}
+
+export interface ExecutionTraceSensitiveContent {
+  statement?: string
+  parameters?: unknown[]
+  parameterTypes?: string[]
+  command?: unknown
+  httpMethod?: string
+  requestPath?: string
+  requestBody?: unknown
+  errorMessage?: string | null
+}
+
+export interface ExecutionTraceDetail extends ExecutionTraceSummary {
+  sensitive: ExecutionTraceSensitiveContent
+  integrityValid: boolean
+}
+
+export interface AuditIntegrityResult {
+  valid: boolean
+  checked: number
+  failedTraceId: string | null
+}
+
+export interface ApprovalLogEntry {
+  id: number
+  eventId: string
+  approvalId: string
+  action: ApprovalLogAction
+  connectionId: string
+  connectionName: string
+  connectionType: DbType | null
+  databaseName: string | null
+  sqlText: string
+  sqlKind: SqlKind
+  permissionMode: PermissionMode
+  message: string | null
+  occurredAt: string
+}
+
+export interface ApprovalLogFilter {
+  connectionId?: string
+  action?: ApprovalLogAction
+  keyword?: string
+  page: number
+  pageSize: number
+}
+
+export interface ApprovalLogPage {
+  rows: ApprovalLogEntry[]
+  total: number
+}
+
+/** @deprecated 旧版 SQL 审计契约；历史数据会自动迁移到 OperationLogEntry。 */
 export interface AuditEntry {
   id: number
   connectionId: string
@@ -355,6 +479,40 @@ export interface ColumnFilter {
   value?: string
 }
 
+export type QdrantFilterClause = 'must' | 'must_not'
+export type QdrantFilterOperator = 'match' | 'match_any' | 'text' | 'phrase' | '>' | '>=' | '<' | '<=' | 'empty' | 'null'
+
+/** Qdrant 的结构化筛选条件；field 使用 payload 路径，id 为 Point ID 特殊字段。 */
+export interface QdrantFilterCondition {
+  clause: QdrantFilterClause
+  field: string
+  op: QdrantFilterOperator
+  value?: string
+}
+
+/** Qdrant 稠密向量近邻查询。 */
+export interface QdrantVectorQuery {
+  vector: number[]
+  /** Named Vector 名称；默认向量不设置。 */
+  using?: string
+  scoreThreshold?: number
+  limit: number
+}
+
+export interface QdrantTableQuery {
+  type: 'qdrant'
+  vector?: QdrantVectorQuery
+  filter?: QdrantFilterCondition[]
+}
+
+export interface QdrantVectorFieldInfo {
+  /** 默认向量不设置名称。 */
+  name?: string
+  kind: 'dense' | 'sparse'
+  size?: number
+  distance?: string
+}
+
 export interface TableDataQuery {
   database?: string
   schema?: string
@@ -367,6 +525,8 @@ export interface TableDataQuery {
   includeVectors?: boolean
   orderBy?: { column: string; direction: 'asc' | 'desc' }[]
   filters?: ColumnFilter[]
+  /** 非关系型数据库专用查询，避免把原生语义混入通用列筛选。 */
+  nativeQuery?: QdrantTableQuery
 }
 
 export interface TableDataResult {
@@ -378,9 +538,13 @@ export interface TableDataResult {
   keyColumns: string[]
   /** 对具体对象进一步收窄连接级能力，例如 Redis Stream 不支持原地更新。 */
   recordOperations?: { insert: boolean; update: boolean; delete: boolean }
-  /** 游标分页结果；未设置时沿用页码/偏移量分页。 */
-  paginationMode?: 'cursor'
+  /** cursor 使用游标分页；none 表示单次 Top K 结果；未设置时沿用页码/偏移量分页。 */
+  paginationMode?: 'cursor' | 'none'
   nextCursor?: string | number
+  /** exact 是完整总数；returned 仅表示本次向量 Top K 返回数量。 */
+  totalMode?: 'exact' | 'returned'
+  /** Qdrant Collection 的向量字段元数据。 */
+  vectorFields?: QdrantVectorFieldInfo[]
 }
 
 /** preload 暴露给渲染进程的 API 形状(见 src/preload/index.ts) */
@@ -446,6 +610,14 @@ export interface Api {
 
   // 审计
   queryAudit(filter: AuditFilter): Promise<AuditPage>
+  queryOperationLogs(filter: OperationLogFilter): Promise<OperationLogPage>
+  queryApprovalLogs(filter: ApprovalLogFilter): Promise<ApprovalLogPage>
+  listExecutionTraces(operationId: string): Promise<ExecutionTraceSummary[]>
+  revealExecutionTrace(id: string): Promise<ExecutionTraceDetail>
+  recordSensitiveAuditAction(action: 'copy' | 'export', traceId: string): Promise<void>
+  verifyAuditIntegrity(): Promise<AuditIntegrityResult>
+  rotateAuditEncryptionKey(): Promise<string>
+  purgeAuditLogs(retentionDays: number): Promise<number>
 
   // 导出:弹保存对话框并把内容写盘,返回保存路径(取消返回 null)
   exportData(opts: ExportOptions): Promise<string | null>

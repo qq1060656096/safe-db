@@ -39,6 +39,19 @@ const collectionInfo = {
   },
   payload_schema: { city: { data_type: 'keyword', points: 2 } }
 }
+const namedCollectionInfo = {
+  ...collectionInfo,
+  config: {
+    ...collectionInfo.config,
+    params: {
+      ...collectionInfo.config.params,
+      vectors: {
+        text: { size: 2, distance: 'Cosine' },
+        image: { size: 3, distance: 'Dot' }
+      }
+    }
+  }
+}
 
 const server = http.createServer(async (req, res) => {
   let body = ''
@@ -51,6 +64,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/') return res.end(JSON.stringify({ title: 'qdrant', version: '1.19.0', commit: 'test' }))
   if (req.method === 'GET' && req.url === '/collections') return send({ collections: [{ name: 'docs' }] })
   if (req.method === 'GET' && req.url === '/collections/docs') return send(collectionInfo)
+  if (req.method === 'GET' && req.url === '/collections/named') return send(namedCollectionInfo)
   if (req.method === 'POST' && req.url === '/collections/docs/points/count') return send({ count: 2 })
   if (req.method === 'POST' && req.url === '/collections/docs/points/scroll') {
     if (parsedBody?.limit === 100) return send({ points: [{ id: 1, payload: { city: 'Beijing', nested: { active: true } } }] })
@@ -59,6 +73,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/collections/docs/points/query') {
     return send({ points: [{ id: 1, score: 0.99, payload: { city: 'Beijing' } }] })
+  }
+  if (req.method === 'POST' && req.url === '/collections/named/points/query') {
+    return send({ points: [{ id: 2, score: 0.88, payload: { city: 'Shanghai' } }] })
   }
   if (req.method === 'PUT' && (req.url === '/collections/docs/points' || req.url === '/collections/docs/points?wait=true')) return send({ operation_id: 7, status: 'completed' })
   if ((req.method === 'POST' || req.method === 'PUT') && /^\/collections\/docs\/points\/(?:payload|vectors|delete)\?wait=true$/.test(req.url)) return send({ operation_id: 8, status: 'completed' })
@@ -112,6 +129,46 @@ try {
   })
   const filteredScroll = requests.findLast((request) => request.url === '/collections/docs/points/scroll')
   assert.deepEqual(filteredScroll?.body?.filter?.must, [{ key: 'city', match: { value: 'Beijing' } }])
+  const vectorResult = await driver.getTableData({
+    table: 'docs', page: 1, pageSize: 100,
+    nativeQuery: {
+      type: 'qdrant',
+      vector: { vector: [0.1, 0.2], scoreThreshold: 0.75, limit: 20 },
+      filter: [
+        { clause: 'must', field: 'payload.city', op: 'match_any', value: '["Beijing", "Shanghai"]' },
+        { clause: 'must_not', field: 'payload.status', op: 'match', value: '"deleted"' }
+      ]
+    }
+  })
+  assert.equal(vectorResult.paginationMode, 'none')
+  assert.equal(vectorResult.totalMode, 'returned')
+  assert.equal(vectorResult.rows[0].score, 0.99)
+  assert.ok(vectorResult.columns.some((column) => column.name === 'score'))
+  assert.deepEqual(vectorResult.vectorFields, [{ kind: 'dense', size: 2, distance: 'Cosine' }])
+  const vectorRequest = requests.findLast((request) => request.url === '/collections/docs/points/query')
+  assert.deepEqual(vectorRequest?.body?.query, [0.1, 0.2])
+  assert.equal(vectorRequest?.body?.score_threshold, 0.75)
+  assert.equal(vectorRequest?.body?.limit, 20)
+  assert.deepEqual(vectorRequest?.body?.filter?.must, [{ key: 'city', match: { any: ['Beijing', 'Shanghai'] } }])
+  assert.deepEqual(vectorRequest?.body?.filter?.must_not, [{ key: 'status', match: { value: 'deleted' } }])
+  const namedResult = await driver.getTableData({
+    table: 'named', page: 1, pageSize: 100,
+    nativeQuery: { type: 'qdrant', vector: { using: 'text', vector: [0.3, 0.4], limit: 5 } }
+  })
+  assert.equal(namedResult.rows[0].score, 0.88)
+  assert.deepEqual(namedResult.vectorFields, [
+    { name: 'text', kind: 'dense', size: 2, distance: 'Cosine' },
+    { name: 'image', kind: 'dense', size: 3, distance: 'Dot' }
+  ])
+  const namedRequest = requests.findLast((request) => request.url === '/collections/named/points/query')
+  assert.equal(namedRequest?.body?.using, 'text')
+  await assert.rejects(
+    driver.getTableData({
+      table: 'docs', page: 1, pageSize: 10,
+      nativeQuery: { type: 'qdrant', vector: { vector: [0.1], limit: 10 } }
+    }),
+    /维度应为 2/
+  )
   await assert.rejects(
     driver.getTableData({ table: 'docs', page: 1, pageSize: 10, orderBy: [{ column: 'id', direction: 'desc' }] }),
     /只支持按 id 正序/
