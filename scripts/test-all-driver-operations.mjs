@@ -62,6 +62,19 @@ try {
     assert.equal(typeof Driver.prototype.executeOperation, 'function', `${Driver.name} 缺少 executeOperation`)
   }
 
+  let sqlserverListTablesSql = ''
+  const sqlserver = new SqlServerDriver({ host: 'localhost', port: 1433, user: 'sa' })
+  sqlserver.poolFor = async () => ({
+    request: () => ({
+      query: async (statement) => {
+        sqlserverListTablesSql = statement
+        return { recordset: [] }
+      }
+    })
+  })
+  await sqlserver.listTables('msdb')
+  assert.match(sqlserverListTablesSql, /AS \[rowCount\]/, 'SQL Server ROWCOUNT 关键字必须作为别名转义')
+
   const dialects = ['mysql', 'postgres', 'sqlite', 'sqlserver']
   for (const dialect of dialects) {
     const commands = compileRelationalOperation({

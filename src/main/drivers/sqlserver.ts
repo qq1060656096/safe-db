@@ -158,7 +158,7 @@ export class SqlServerDriver implements DbDriver {
   async listTables(database?: string, includeStats = false): Promise<TableInfo[]> {
     const result = await (await this.poolFor(database)).request().query(
       `SELECT s.name AS [schema], o.name, o.type,
-              ${includeStats ? 'SUM(CASE WHEN p.index_id IN (0, 1) THEN p.rows ELSE 0 END)' : 'NULL'} AS rowCount,
+              ${includeStats ? 'SUM(CASE WHEN p.index_id IN (0, 1) THEN p.rows ELSE 0 END)' : 'NULL'} AS [rowCount],
               o.create_date AS createdAt, o.modify_date AS updatedAt, o.object_id AS objectId,
               CAST(ep.value AS nvarchar(4000)) AS comment
        FROM sys.objects o

@@ -188,6 +188,26 @@ npm run rebuild
 npm run dev
 ```
 
+To test every database driver locally, Docker Compose can start all supported servers except SQLite:
+
+```bash
+npm run db:up
+docker compose ps
+```
+
+Every host port is in the `60000` range and all connections use `127.0.0.1`:
+
+| Database | Port | User | Password | Default database / auth database |
+| --- | ---: | --- | --- | --- |
+| MySQL | 60001 | root | `SafeDb_123456` | safedb |
+| PostgreSQL | 60002 | postgres | `SafeDb_123456` | safedb |
+| SQL Server | 60003 | sa | `SafeDb_123456` | master |
+| MongoDB | 60004 | root | `SafeDb_123456` | admin / admin |
+| Redis | 60005 | default | `SafeDb_123456` | 0 |
+| Qdrant | 60006 | - | - | - |
+
+You can also start one service, for example `docker compose up -d postgres`. Run `npm run db:down` to stop the services, or `docker compose down -v` to stop them and delete their test data. SQLite does not need a container; create a database file directly from the new-connection dialog.
+
 `npm run rebuild` rebuilds the native `better-sqlite3` module for the current Electron version. After the first launch:
 
 In macOS development mode, `npm run dev` automatically prepares an Electron runtime named `safe db` under `node_modules/.cache/`, so the product name is also displayed correctly in the system menu bar. This cache is not committed to version control.

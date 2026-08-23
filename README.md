@@ -194,6 +194,26 @@ npm run rebuild
 npm run dev
 ```
 
+如需在本机测试各数据库驱动，可通过 Docker Compose 一次启动除 SQLite 外的全部数据库：
+
+```bash
+npm run db:up
+docker compose ps
+```
+
+所有宿主机端口均使用 `60000` 段，连接地址统一为 `127.0.0.1`：
+
+| 数据库 | 端口 | 用户名 | 密码 | 默认数据库 / 认证库 |
+| --- | ---: | --- | --- | --- |
+| MySQL | 60001 | root | `SafeDb_123456` | safedb |
+| PostgreSQL | 60002 | postgres | `SafeDb_123456` | safedb |
+| SQL Server | 60003 | sa | `SafeDb_123456` | master |
+| MongoDB | 60004 | root | `SafeDb_123456` | admin / admin |
+| Redis | 60005 | default | `SafeDb_123456` | 0 |
+| Qdrant | 60006 | - | - | - |
+
+也可以只启动单个服务，例如 `docker compose up -d postgres`。停止服务使用 `npm run db:down`；如需同时清除测试数据卷，使用 `docker compose down -v`。SQLite 无需容器，可直接在新建连接时选择目录并创建数据库文件。
+
 `npm run rebuild` 会为当前 Electron 版本重建 `better-sqlite3` 原生模块。首次启动后：
 
 在 macOS 开发模式下，`npm run dev` 会在 `node_modules/.cache/` 中自动准备名称为 `safe db` 的 Electron 运行时，使系统菜单栏也显示正确的产品名；该缓存不会进入版本控制。

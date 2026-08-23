@@ -108,6 +108,16 @@ function minimumCenterWidth(): number {
 function visibleLeftWidth(): number { return displayedPanelWidths.value.left }
 function visibleRightWidth(): number { return displayedPanelWidths.value.right }
 
+function normalizeVisiblePanelWidths(): { left: number; right: number } {
+  const visible = displayedPanelWidths.value
+  // 窗口变窄时 displayedPanelWidths 会临时压缩面板，但保留用户原始偏好。
+  // 用户开始主动调整后，应从屏幕上的实际宽度继续，否则隐藏的原始宽度会
+  // 抵消拖拽增量，表现为面板无法变宽或在首次移动时突然跳动。
+  if (!leftCollapsed.value) leftWidth.value = visible.left
+  if (!rightCollapsed.value) rightWidth.value = visible.right
+  return visible
+}
+
 function setPanelWidth(side: 'left' | 'right', width: number): void {
   if (side === 'left') {
     const available = viewportWidth.value - visibleRightWidth() - minimumCenterWidth()
@@ -172,9 +182,10 @@ function resizePanel(event: PointerEvent): void {
 function startResize(side: 'left' | 'right', event: PointerEvent): void {
   if (event.button !== 0 || isCompactLayout()) return
   event.preventDefault()
+  const visible = normalizeVisiblePanelWidths()
   resizingSide.value = side
   resizeStartX = event.clientX
-  resizeStartWidth = side === 'left' ? leftWidth.value : rightWidth.value
+  resizeStartWidth = visible[side]
   document.body.classList.add('panel-resizing')
   window.addEventListener('pointermove', resizePanel)
   window.addEventListener('pointerup', stopResize)
@@ -184,9 +195,10 @@ function startResize(side: 'left' | 'right', event: PointerEvent): void {
 function resizeWithKeyboard(side: 'left' | 'right', event: KeyboardEvent): void {
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
   event.preventDefault()
+  const visible = normalizeVisiblePanelWidths()
   const direction = event.key === 'ArrowRight' ? 1 : -1
   const delta = side === 'left' ? direction * 10 : direction * -10
-  setPanelWidth(side, (side === 'left' ? leftWidth.value : rightWidth.value) + delta)
+  setPanelWidth(side, visible[side] + delta)
   persistWorkspaceLayout()
 }
 
