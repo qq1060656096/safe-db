@@ -36,7 +36,7 @@ export interface DbDriver {
   cancel?(): Promise<void>
   test(): Promise<void>
   listDatabases(): Promise<string[]>
-  listTables(database?: string, includeStats?: boolean): Promise<TableInfo[]>
+  listTables(database?: string, includeStats?: boolean, options?: { forExport?: boolean }): Promise<TableInfo[]>
   listRoutines(database?: string): Promise<RoutineInfo[]>
   listColumns(database: string | undefined, table: string, schema?: string): Promise<ColumnInfo[]>
   listIndexes(database: string | undefined, table: string, schema?: string): Promise<IndexInfo[]>
@@ -44,7 +44,8 @@ export interface DbDriver {
   listCheckConstraints(database: string | undefined, table: string, schema?: string): Promise<CheckConstraintInfo[]>
   getObjectDdl(database: string | undefined, table: string, schema?: string): Promise<string>
   getRoutineDefinition(database: string | undefined, routine: string, type: RoutineInfo['type'], schema?: string, argumentsSignature?: string): Promise<string>
-  getTableData(q: TableDataQuery): Promise<TableDataResult>
+  /** rawValues 仅供主进程导出使用，避免把二进制、文档、向量转换成网格展示文本。 */
+  getTableData(q: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult>
   /** 执行任意 SQL,每条语句一个 QueryResult */
   run(sql: string, database?: string): Promise<QueryResult[]>
   /**

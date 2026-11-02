@@ -138,6 +138,24 @@ export const useAppStore = defineStore('app', {
       invalidateConnectionMetadata(saved.id)
       await this.loadConnections()
     },
+    async reorderConnections(ids: string[]): Promise<void> {
+      const previous = this.connections.slice()
+      const byId = new Map(previous.map((connection) => [connection.id, connection]))
+      if (ids.length !== previous.length || new Set(ids).size !== ids.length || ids.some((id) => !byId.has(id))) return
+
+      this.connections = ids.map((id) => byId.get(id)!)
+      try {
+        const persisted = await window.api.reorderConnections(ids)
+        // 沿用现有对象，避免拖拽排序导致已加载的连接树被重建。
+        this.connections = persisted.map((connection) => {
+          const existing = byId.get(connection.id)
+          return existing && JSON.stringify(existing) === JSON.stringify(connection) ? existing : connection
+        })
+      } catch (error) {
+        this.connections = previous
+        throw error
+      }
+    },
     async duplicateConnection(id: string, name: string): Promise<ConnectionMeta> {
       const copied = await window.api.duplicateConnection(id, name)
       await this.loadConnections()
@@ -272,7 +290,7 @@ export const useAppStore = defineStore('app', {
         this.pendingApproval = {
           token: response.approvalToken!,
           connectionId,
-          sql,
+          sql: response.preview ?? sql,
           sqlKind: response.sqlKind ?? 'WRITE',
           connectionName,
           database

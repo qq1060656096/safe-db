@@ -32,6 +32,7 @@ export interface DriverCapabilities {
   recordTargetKind: 'table' | 'collection' | 'key'
   databases: {
     create: OperationSupport
+    drop: OperationSupport
   }
   objectKinds: DatabaseObjectKind[]
   records: {
@@ -92,6 +93,7 @@ export type RecordMutation =
 
 /** 渲染进程只表达意图；标识符转义、参数绑定和 REST 构造全部留在主进程。 */
 export type DatabaseOperation =
+  | { kind: 'database.drop'; database: string }
   | { kind: 'records.mutate'; target: DatabaseObjectRef; mutations: RecordMutation[] }
   | { kind: 'records.clear'; target: DatabaseObjectRef }
   | {
@@ -296,7 +298,7 @@ export interface ExecuteResponse {
   atomicity?: ExecutionAtomicity
   succeeded?: number
   failed?: number
-  /** 审批弹窗展示的不可执行预览文本。 */
+  /** 审批弹窗展示文本：SQL 执行返回原始 SQL，结构化操作返回对应数据库命令预览。 */
   preview?: string
 }
 
@@ -557,12 +559,14 @@ export interface Api {
   /** 其他窗口修改共享数据时通知当前窗口刷新；返回取消监听函数。 */
   onDataChanged(listener: (resource: 'connections' | 'queries' | 'all') => void): () => void
   /** 任一窗口或 Agent 成功改变数据库元数据后，通知所有窗口失效对应连接的缓存。 */
-  onMetadataChanged(listener: (connectionId: string) => void): () => void
+  onMetadataChanged(listener: (connectionId: string, droppedDatabase?: string) => void): () => void
   /** Agent CLI 发起写操作时通知桌面端显示人工审批。 */
   onAgentApprovalRequested(listener: (request: AgentApprovalRequest) => void): () => void
 
   // 连接管理
   listConnections(): Promise<ConnectionMeta[]>
+  /** 按给定的完整 ID 顺序持久化连接列表。 */
+  reorderConnections(ids: string[]): Promise<ConnectionMeta[]>
   saveConnection(cfg: ConnectionConfig): Promise<ConnectionMeta>
   /** 复制完整连接配置；凭据在主进程内保持加密，不暴露给渲染进程。 */
   duplicateConnection(id: string, name: string): Promise<ConnectionMeta>
@@ -621,6 +625,23 @@ export interface Api {
 
   // 导出:弹保存对话框并把内容写盘,返回保存路径(取消返回 null)
   exportData(opts: ExportOptions): Promise<string | null>
+  /** 按选定数据库导出连接内的对象结构和/或完整数据。 */
+  exportDatabase(opts: DatabaseExportOptions): Promise<DatabaseExportResult | null>
+}
+
+export type DatabaseExportMode = 'data' | 'structure' | 'structure-and-data'
+
+export interface DatabaseExportOptions {
+  connectionId: string
+  /** Qdrant 没有数据库层级，使用空数组。 */
+  databases: string[]
+  mode: DatabaseExportMode
+}
+
+export interface DatabaseExportResult {
+  path: string
+  objects: number
+  rows: number
 }
 
 export interface ExportOptions {

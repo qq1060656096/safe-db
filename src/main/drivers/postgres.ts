@@ -378,7 +378,7 @@ export class PostgresDriver implements DbDriver {
     return definition.trim()
   }
 
-  async getTableData(qd: TableDataQuery): Promise<TableDataResult> {
+  async getTableData(qd: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult> {
     const client = await this.clientFor(qd.database)
     const schema = qd.schema ?? 'public'
     const columns = await this.listColumns(qd.database, qd.table, schema)
@@ -400,7 +400,7 @@ export class PostgresDriver implements DbDriver {
     const countRes = await client.query(`SELECT COUNT(*) AS n FROM ${qualified}${where.sql}`, where.params)
     return {
       columns,
-      rows: sanitizeRows(res.rows),
+      rows: options?.rawValues ? res.rows : sanitizeRows(res.rows),
       total: Number(countRes.rows[0].n),
       editable: keyCols.length > 0,
       keyColumns: keyCols
@@ -422,12 +422,24 @@ export class PostgresDriver implements DbDriver {
   }
 
   async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    const commands = compileRelationalOperation(operation, 'postgres', this.cfg.database)
+    if (operation.kind === 'database.drop') {
+      // DROP DATABASE 不能运行在目标库或事务中；仅关闭本驱动自己的目标库会话。
+      const client = await this.clientFor('postgres')
+      const target = this.clients.get(operation.database)
+      if (target) {
+        this.clients.delete(operation.database)
+        await target.end()
+      }
+      await client.query(commands[0].sql)
+      if (this.cfg.database === operation.database) this.cfg.database = undefined
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
     const database = 'target' in operation
       ? operation.target.database
       : 'source' in operation ? operation.source.database
         : operation.database
     const client = await this.clientFor(database)
-    const commands = compileRelationalOperation(operation, 'postgres', this.cfg.database)
     const transactional = !(operation.kind === 'object.create' && operation.objectType === 'database')
     if (transactional) await client.query('BEGIN')
     let affectedRows = 0

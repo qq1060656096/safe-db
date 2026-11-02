@@ -106,6 +106,14 @@ export class DriverManager {
 
     const existing = this.drivers.get(id)
     if (existing) {
+      const cfg = this.getConfig(id)
+      if (!cfg) throw new Error('连接不存在')
+      if (cfg.type !== 'sqlite' && cfg.ssh?.enabled && !this.tunnels.isActive(id)) {
+        // SSH 端已因休眠、切网等原因断开时，旧驱动仍指向失效的本地端口。
+        // 先整体摘除，再递归建立新隧道和新数据库会话。
+        await this.invalidate(id)
+        return this.get(id)
+      }
       // 驱动仍在缓存中不代表底层会话仍可用（例如 MySQL 空闲超时后会进入 closed state）。
       // connect 对各驱动均为幂等操作，并会在需要时恢复底层连接。
       return this.reconnectDriver(id, existing)

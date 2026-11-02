@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseOperation, ExecuteResponse, SqlKind } from '../../shared/types'
+import type { DatabaseOperation, DbType, ExecuteResponse, SqlKind } from '../../shared/types'
 import type { DriverManager } from '../drivers/manager'
 import type { AuditStore } from '../store/audit'
 import type { ConnectionStore } from '../store/connections'
@@ -7,6 +7,8 @@ import { classifyDatabaseInput } from './nativeCommand'
 import { decide } from './permission'
 import { assertDatabaseOperation, databaseOperationKind, databaseOperationPreview, operationSupports } from './databaseOperation'
 import { currentOperationId, runWithOperationContext } from '../audit/trace'
+import { relationalOperationPreview, type RelationalDialect } from '../drivers/relationalOperation'
+import { isSystemDatabase } from '../../shared/databasePolicy'
 
 interface PendingApproval {
   /** 审计关联 ID 与可执行 token 分离，审批日志绝不能泄露可执行凭证。 */
@@ -26,6 +28,13 @@ export interface ApprovalResolvedEvent {
 
 const APPROVAL_TTL_MS = 5 * 60 * 1000
 
+const RELATIONAL_DIALECTS: Partial<Record<DbType, RelationalDialect>> = {
+  mysql: 'mysql',
+  postgres: 'postgres',
+  sqlite: 'sqlite',
+  sqlserver: 'sqlserver'
+}
+
 /**
  * 统一执行管道：所有 SQL 和原生命令（编辑器 / 网格编辑 / 结构变更）都经过
  * 分类 → 权限判定 →（审批）→ 事务或受控执行 → 审计。
@@ -33,7 +42,7 @@ const APPROVAL_TTL_MS = 5 * 60 * 1000
 export class Executor {
   private pending = new Map<string, PendingApproval>()
   private approvalListeners = new Set<(event: ApprovalResolvedEvent) => void>()
-  private metadataListeners = new Set<(connectionId: string) => void>()
+  private metadataListeners = new Set<(connectionId: string, droppedDatabase?: string) => void>()
 
   constructor(
     private connections: ConnectionStore,
@@ -86,17 +95,24 @@ export class Executor {
     return () => this.approvalListeners.delete(listener)
   }
 
-  onMetadataChanged(listener: (connectionId: string) => void): () => void {
+  onMetadataChanged(listener: (connectionId: string, droppedDatabase?: string) => void): () => void {
     this.metadataListeners.add(listener)
     return () => this.metadataListeners.delete(listener)
   }
 
-  private emitMetadataChanged(connectionId: string): void {
-    for (const listener of this.metadataListeners) listener(connectionId)
+  private emitMetadataChanged(connectionId: string, droppedDatabase?: string): void {
+    for (const listener of this.metadataListeners) listener(connectionId, droppedDatabase)
   }
 
   private emitApprovalResolved(token: string, response: ExecuteResponse): void {
     for (const listener of this.approvalListeners) listener({ token, response })
+  }
+
+  private operationPreview(connection: { type: DbType; database?: string }, operation: DatabaseOperation): string {
+    const dialect = RELATIONAL_DIALECTS[connection.type]
+    return dialect
+      ? relationalOperationPreview(operation, dialect, connection.database)
+      : databaseOperationPreview(operation)
   }
 
   async execute(connectionId: string, sql: string, database?: string): Promise<ExecuteResponse> {
@@ -137,7 +153,9 @@ export class Executor {
       const token = randomUUID()
       const pending = { approvalId: randomUUID(), connectionId, sql, database, sqlKind: kind, createdAt: Date.now() }
       this.addPendingApproval(token, pending)
-      return { status: 'needsApproval', sqlKind: kind, approvalToken: token }
+      // 由主进程返回实际进入待审批队列的原始 SQL，弹窗不再依赖
+      // 渲染进程的本地副本，避免展示内容与确认后执行内容不一致。
+      return { status: 'needsApproval', sqlKind: kind, approvalToken: token, preview: sql }
     }
 
     return this.doExecute(connectionId, sql, database, kind, 'not_required')
@@ -154,6 +172,9 @@ export class Executor {
     try {
       assertDatabaseOperation(input)
       operation = input
+      if (operation.kind === 'database.drop' && isSystemDatabase(cfg.type, operation.database)) {
+        throw new Error('不能删除系统数据库')
+      }
       const capabilities = this.drivers.capabilities(connectionId)
       const unsupported = operationSupports(capabilities, operation).find((item) => !item.supported)
       if (unsupported && !unsupported.supported) throw new Error(unsupported.reason)
@@ -162,7 +183,7 @@ export class Executor {
     }
 
     const kind = databaseOperationKind(operation)
-    const preview = databaseOperationPreview(operation)
+    const preview = this.operationPreview(cfg, operation)
     const database = 'target' in operation
       ? operation.target.database
       : 'source' in operation ? operation.source.database
@@ -331,7 +352,7 @@ export class Executor {
   ): Promise<ExecuteResponse> {
     const cfg = this.connections.get(connectionId)
     if (!cfg) return { status: 'error', error: '连接不存在' }
-    const preview = databaseOperationPreview(operation)
+    const preview = this.operationPreview(cfg, operation)
     const database = 'target' in operation
       ? operation.target.database
       : 'source' in operation ? operation.source.database
@@ -340,6 +361,24 @@ export class Executor {
     try {
       const driver = await this.drivers.get(connectionId)
       const outcome = await driver.executeOperation(operation)
+      if (operation.kind === 'database.drop') {
+        try {
+          const latest = this.connections.get(connectionId)
+          const isDefault = latest?.database === operation.database
+            || (latest?.type === 'sqlserver' && latest.database?.toLowerCase() === operation.database.toLowerCase())
+          if (latest && isDefault) {
+            this.connections.save({
+              ...latest, database: undefined,
+              // MongoDB 认证库和浏览默认库是独立配置，不因删除默认库改变认证来源。
+              ...(latest.type === 'mongodb' && latest.user && !latest.authDatabase ? { authDatabase: latest.database } : {})
+            })
+          }
+          await this.drivers.invalidate(connectionId)
+        } catch (error) {
+          this.emitMetadataChanged(connectionId, operation.database)
+          throw new Error(`数据库已删除，但连接状态更新失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       const durationMs = Date.now() - started
       const affectedRows = outcome.results.reduce((sum, result) => sum + (result.affectedRows ?? 0), 0)
       this.audit.insert({
@@ -350,7 +389,7 @@ export class Executor {
         affectedRows, durationMs
       })
       if (kind === 'DDL' || (kind === 'WRITE' && driver.capabilities.recordModel !== 'row')) {
-        this.emitMetadataChanged(connectionId)
+        this.emitMetadataChanged(connectionId, operation.kind === 'database.drop' ? operation.database : undefined)
       }
       return {
         status: 'ok', results: outcome.results, sqlKind: kind, durationMs,

@@ -466,7 +466,7 @@ export class QdrantDriver implements DbDriver {
     throw new Error('Qdrant 不支持 SQL 函数或存储过程')
   }
 
-  async getTableData(query: TableDataQuery): Promise<TableDataResult> {
+  async getTableData(query: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult> {
     const nativeQuery = query.nativeQuery?.type === 'qdrant' ? query.nativeQuery : undefined
     const filter = qdrantFilter(query.filters, nativeQuery?.filter)
     const order = query.orderBy?.[0]
@@ -536,7 +536,9 @@ export class QdrantDriver implements DbDriver {
     }))
     return {
       columns: this.columnsFrom(info, result.points),
-      rows,
+      rows: options?.rawValues
+        ? result.points.map((point) => ({ id: point.id, payload: point.payload ?? {}, vector: point.vector }))
+        : rows,
       total: count.count,
       totalMode: 'exact',
       editable: true,

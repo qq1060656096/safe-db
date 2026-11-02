@@ -123,6 +123,8 @@ try {
   const second = await driver.getTableData({ table: 'docs', page: 2, pageSize: 1, cursor: first.nextCursor, includeVectors: true })
   assert.equal(second.rows[0].id, 2)
   assert.equal(second.rows[0].vector, '[0.3,0.4]')
+  const raw = await driver.getTableData({ table: 'docs', page: 1, pageSize: 1, includeVectors: true }, { rawValues: true })
+  assert.deepEqual(raw.rows[0], { id: 1, payload: { city: 'Beijing' }, vector: [0.1, 0.2] })
   await driver.getTableData({
     table: 'docs', page: 1, pageSize: 10,
     filters: [{ column: 'payload.city', op: '=', value: '"Beijing"' }]

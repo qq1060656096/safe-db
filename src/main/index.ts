@@ -257,9 +257,9 @@ if (!gotLock) {
     configureExecutionTraceRecorder(audit)
     drivers = new DriverManager((id) => connections.get(id))
     const executor = new Executor(connections, drivers, audit)
-    executor.onMetadataChanged((connectionId) => {
+    executor.onMetadataChanged((connectionId, droppedDatabase) => {
       for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.webContents.isDestroyed()) window.webContents.send('metadata:changed', connectionId)
+        if (!window.webContents.isDestroyed()) window.webContents.send('metadata:changed', connectionId, droppedDatabase)
       }
     })
     agentService = new AgentService(connections, drivers, executor, notifyAgentApproval)

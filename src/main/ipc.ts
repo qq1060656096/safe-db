@@ -9,6 +9,7 @@ import type {
   AuditFilter,
   ConnectionConfig,
   DatabaseOperation,
+  DatabaseExportOptions,
   ExecuteResponse,
   ExportOptions,
   OperationLogFilter,
@@ -18,6 +19,7 @@ import type {
 import { DriverManager, createDriver } from './drivers/manager'
 import { establishTunnel, type TunnelHandle } from './ssh/tunnel'
 import { Executor } from './core/executor'
+import { assertDatabaseExportOptions, saveDatabaseExport } from './core/databaseExport'
 import { runWithOperationContext } from './audit/trace'
 import type { AuditStore, OperationLogInsert } from './store/audit'
 import type { ConnectionStore } from './store/connections'
@@ -222,6 +224,16 @@ export function registerIpcHandlers(
 
   // ---- 连接管理 ----
   ipcMain.handle('connections:list', () => connections.list())
+
+  ipcMain.handle('connections:reorder', (event, ids: string[]) => audited({
+    category: 'configuration', action: 'REORDER_CONNECTIONS',
+    targetType: 'connection-list', summary: '调整数据库连接排序',
+    details: { connectionIds: ids }
+  }, () => {
+    const reordered = connections.reorder(ids)
+    notifyOtherWindows(event, 'connections')
+    return reordered
+  }))
 
   ipcMain.handle('connections:save', async (event, cfg: ConnectionConfig) => {
     const existing = connections.get(cfg.id)
@@ -624,6 +636,35 @@ export function registerIpcHandlers(
   })
 
   // ---- 导出:保存对话框 + 写盘 ----
+  const exportingConnections = new Set<string>()
+  ipcMain.handle('export:database', async (event, opts: DatabaseExportOptions) => {
+    assertDatabaseExportOptions(opts)
+    const connection = connections.get(opts.connectionId)
+    if (!connection) throw new Error('连接不存在')
+    if (exportingConnections.has(connection.id)) throw new Error('该连接正在导出，请等待完成')
+    const win = senderWindow(event)
+    if (!win) return null
+    const titles = { data: '导出数据', structure: '导出结构', 'structure-and-data': '导出结构和数据' }
+    const title = titles[opts.mode]
+    const safeName = connection.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_') || 'database'
+    const res = await dialog.showSaveDialog(win, {
+      title, defaultPath: `${safeName}-${opts.mode}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    })
+    if (res.canceled || !res.filePath) return null
+    if (exportingConnections.has(connection.id)) throw new Error('该连接正在导出，请等待完成')
+    exportingConnections.add(connection.id)
+    try {
+      return await audited({
+        category: 'export', action: 'EXPORT_DATABASE', summary: title, ...connectionContext(connection.id),
+        targetType: 'file', targetName: basename(res.filePath),
+        details: { mode: opts.mode, databases: opts.databases }
+      }, async () => saveDatabaseExport(res.filePath!, await drivers.get(connection.id), connection, opts))
+    } finally {
+      exportingConnections.delete(connection.id)
+    }
+  })
+
   ipcMain.handle('export:save', async (event, opts: ExportOptions) => {
     const win = senderWindow(event)
     if (!win) return null

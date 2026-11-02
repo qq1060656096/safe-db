@@ -28,6 +28,14 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 .sidebar-tree { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 4px; }
 .sidebar-tree > .n-tree { min-height: 100%; }
 .tree-node-title { min-width: 0; max-width: 220px; display: inline-flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-tree-node { position: relative; cursor: grab; transition: box-shadow 100ms ease, opacity 100ms ease; }
+.connection-tree-node.is-connection-dragging { cursor: grabbing; opacity: .42; }
+.connection-tree-node.is-connection-drop-before { box-shadow: inset 0 2px #18a058; }
+.connection-tree-node.is-connection-drop-after { box-shadow: inset 0 -2px #18a058; }
+.connection-drag-handle { display: inline-flex; flex: 0 0 auto; align-items: center; color: #a2a7ad; cursor: grab; opacity: .45; transition: color 100ms ease, opacity 100ms ease; }
+.connection-drag-handle:hover { color: #18a058; opacity: 1; }
+.connection-drag-handle:active { cursor: grabbing; }
+.connection-drag-handle.is-disabled { color: #a2a7ad; cursor: default; opacity: .18; }
 .connection-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-activity-status { flex: 0 0 auto; color: #18a058; font-size: 11px; }
 .connection-prefix-state { position: relative; width: 20px; height: 20px; display: inline-grid; flex: 0 0 20px; place-items: center; }

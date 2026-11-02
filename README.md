@@ -80,7 +80,7 @@ CLI 默认输出稳定的单行 JSON，Codex、Claude Code 以及其他支持 Sh
 | 结构设计 | 查看列、索引与 DDL，可视化建表和结构修改 |
 | 安全控制 | 只读、审批、完全访问三档权限及高风险 SQL 拦截 |
 | 操作日志 | 记录成功、失败、被阻止和被取消的数据库操作 |
-| 数据导出 | 查询结果和表数据导出为 CSV / JSON |
+| 数据导出 | 查询结果和表数据导出为 CSV / JSON；连接级导出数据、结构或结构和数据 |
 | 多语言 | 支持多语言界面，可按使用习惯切换语言 |
 | 工作台体验 | 多窗口和可调节面板 |
 
@@ -123,12 +123,14 @@ safe db 基于 Electron 和 Node.js，桌面端与 Agent CLI 支持主流桌面�
 - MySQL、PostgreSQL、SQLite、SQL Server、MongoDB、Redis、Qdrant 连接与连接测试
 - 所有 TCP 数据库连接均支持 SSH 跳板机、密码与私钥认证
 - 数据库、Schema、表、视图、函数和存储过程浏览
+- MySQL、PostgreSQL、SQL Server 和 MongoDB 支持右键删除数据库，需输入数据库名称确认，并沿用连接的只读限制、审批和审计；系统库受保护。
 - CodeMirror SQL 编辑器、方言感知补全与 `Cmd/Ctrl + Enter` 快速执行
 - 查询保存、连接级 / 数据库级归档和包含加密凭据的完整连接导入导出
 - 表数据分页、排序、组合筛选、行新增 / 修改 / 删除
 - 无主键表自动降级为只读浏览，避免无法准确定位行
 - 表结构、列、索引、DDL 与函数定义查看；支持可视化建表和结构修改
 - 查询结果或表数据导出为 CSV / JSON
+- 右键左侧连接，选择“导出数据”“导出结构”或“导出结构和数据”，可多选数据库并保存为 JSON 文件；记录按页读取，不受单表 5 万行导出上限限制。结构包含对象定义、字段、索引、约束和方法定义，视图仅导出定义。二进制、大整数与日期使用带 `$safeDbType` 的 JSON 对象保存，MongoDB 使用规范 Extended JSON，Qdrant 包含完整向量。导出按读取时的实时数据生成，不提供跨表事务快照。
 - 多语言界面、多标签页、多窗口和可调节面板
 
 ### MongoDB、Redis 与 Qdrant 原生命令
@@ -247,6 +249,8 @@ npm run test:classify
 npm run test:native
 npm run test:qdrant
 npm run test:operations
+npm run test:export
+npm run test:drop-database
 npm run test:drivers
 
 # AI Agent CLI 服务测试
@@ -312,6 +316,8 @@ npm run test:classify
 npm run test:native
 npm run test:qdrant
 npm run test:operations
+npm run test:export
+npm run test:drop-database
 npm run test:agent
 npm run test:cli
 npm run build

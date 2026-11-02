@@ -12,6 +12,7 @@ import type {
 import { classifyMongoCommand, parseMongoCommands } from '../core/nativeCommand'
 import type { DbDriver, DriverOperationResult, TableDataQuery, TableDataResult } from './base'
 import { capabilitiesForType } from './capabilities'
+import { isSystemDatabase } from '../../shared/databasePolicy'
 import { beginExternalExecution, finishExternalExecution, traceExecution, type ExternalExecutionHandle } from '../audit/trace'
 
 function displayValue(value: unknown): unknown {
@@ -272,7 +273,7 @@ export class MongoDriver implements DbDriver {
     return clauses.length > 1 ? { $and: clauses } : clauses[0] ?? {}
   }
 
-  async getTableData(query: TableDataQuery): Promise<TableDataResult> {
+  async getTableData(query: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult> {
     const collection = this.db(query.database).collection(query.table)
     const filter = this.filter(query)
     let cursor = collection.find(filter)
@@ -286,7 +287,9 @@ export class MongoDriver implements DbDriver {
     ])
     return {
       columns,
-      rows: documents.map(displayDocument),
+      rows: options?.rawValues
+        ? documents.map((document) => BSON.EJSON.serialize(document, { relaxed: false }) as Record<string, unknown>)
+        : documents.map(displayDocument),
       total,
       editable: true,
       keyColumns: ['_id']
@@ -294,6 +297,11 @@ export class MongoDriver implements DbDriver {
   }
 
   async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    if (operation.kind === 'database.drop') {
+      if (isSystemDatabase('mongodb', operation.database)) throw new Error('不能删除系统数据库')
+      await this.db(operation.database).dropDatabase()
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
     const database = 'target' in operation
       ? operation.target.database
       : 'source' in operation ? operation.source.database

@@ -392,7 +392,7 @@ export class SqlServerDriver implements DbDriver {
     return String(definition).trim()
   }
 
-  async getTableData(q: TableDataQuery): Promise<TableDataResult> {
+  async getTableData(q: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult> {
     const schema = q.schema ?? 'dbo'
     const pool = await this.poolFor(q.database)
     const columns = await this.listColumns(q.database, q.table, schema)
@@ -418,7 +418,7 @@ export class SqlServerDriver implements DbDriver {
     const count = await countRequest.query(`SELECT COUNT_BIG(*) AS total FROM ${qualified}${where.sql}`)
     return {
       columns,
-      rows: sanitizeRows(result.recordset as Record<string, unknown>[]),
+      rows: options?.rawValues ? result.recordset as Record<string, unknown>[] : sanitizeRows(result.recordset as Record<string, unknown>[]),
       total: Number(count.recordset[0]?.total ?? 0),
       editable: primary.length > 0,
       keyColumns: primary
@@ -455,6 +455,18 @@ export class SqlServerDriver implements DbDriver {
   }
 
   async executeOperation(operation: DatabaseOperation): Promise<DriverOperationResult> {
+    if (operation.kind === 'database.drop') {
+      const commands = compileRelationalOperation(operation, 'sqlserver', this.cfg.database)
+      const pool = await this.poolFor('master')
+      for (const [name, target] of this.pools) {
+        if (name.toLowerCase() !== operation.database.toLowerCase()) continue
+        this.pools.delete(name)
+        await target.close()
+      }
+      await this.runRequest(pool.request(), commands[0].sql)
+      if (this.cfg.database?.toLowerCase() === operation.database.toLowerCase()) this.cfg.database = undefined
+      return { results: [{ kind: 'exec', affectedRows: 1 }], atomicity: 'single-request', succeeded: 1, failed: 0 }
+    }
     const database = 'target' in operation
       ? operation.target.database
       : 'source' in operation ? operation.source.database

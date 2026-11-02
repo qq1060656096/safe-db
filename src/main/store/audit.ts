@@ -3,7 +3,12 @@ import Database from 'better-sqlite3'
 import { createCipheriv, createDecipheriv, createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { currentOperationId, sanitizeSensitiveContent, type ExecutionTraceRecord } from '../audit/trace'
+import {
+  currentOperationId,
+  sanitizeErrorMessage,
+  sanitizeSensitiveContent,
+  type ExecutionTraceRecord
+} from '../audit/trace'
 import type {
   ApprovalLogAction,
   ApprovalLogEntry,
@@ -421,8 +426,8 @@ export class AuditStore {
   recordExecutionTrace(record: ExecutionTraceRecord): void {
     const encrypted = this.encrypt({
       ...sanitizeSensitiveContent(record.sensitive),
-      // 驱动错误经常回显连接串或认证上下文；状态与错误码足以审计，原始消息不落盘。
-      errorMessage: record.errorMessage ? '底层执行失败（原始错误消息未记录）' : null
+      // 错误原文是诊断 SQL、超时和断线问题的必要证据；脱敏后与 SQL 一起加密保存。
+      errorMessage: sanitizeErrorMessage(record.errorMessage)
     })
     const metadata = {
       id: record.id, operationId: record.operationId, spanId: record.spanId,

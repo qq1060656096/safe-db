@@ -9,7 +9,7 @@ import { useContextMenuDismiss } from '../contextMenu'
 import type { AppTab } from '../stores/app'
 import { useAppStore } from '../stores/app'
 import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, tableColumnLayoutScope, useLayoutStore } from '../stores/layout'
-import { isNumericColumn, toCsv, toJson } from '../utils'
+import { formatCellValue, isNumericColumn, toCsv, toJson } from '../utils'
 
 interface NewRow { tempId: string; values: Record<string, unknown> }
 interface FilterInput { op: ColumnFilter['op']; value: string }
@@ -186,7 +186,7 @@ function toLiteral(value: unknown, column: ColumnInfo | undefined, type: DbType 
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(value)
   if (typeof value === 'boolean') return type === 'postgres' ? (value ? 'true' : 'false') : value ? '1' : '0'
-  const stringValue = String(value)
+  const stringValue = formatCellValue(value)
   if (column && numericTypes.test(column.dataType) && /^-?\d+(\.\d+)?$/.test(stringValue)) return stringValue
   if (/^(boolean)$/i.test(column?.dataType ?? '') && /^(true|false)$/i.test(stringValue)) return stringValue.toLowerCase()
   return "'" + stringValue.replace(/'/g, "''") + "'"
@@ -567,21 +567,14 @@ async function exportData(format: 'csv' | 'json', scope: 'page' | 'all'): Promis
 }
 function onExportSelect(key: string | number): void { const [format, scope] = String(key).split('-') as ['csv' | 'json', 'page' | 'all']; void exportData(format, scope) }
 function tableCell(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  const text = String(value)
+  const text = formatCellValue(value)
   return /[\t\r\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 function clipboardValue(value: unknown): string {
-  if (value === null) return 'NULL'
-  if (value === undefined) return ''
-  if (typeof value === 'object') {
-    try { return JSON.stringify(value) }
-    catch { return String(value) }
-  }
-  return String(value)
+  return formatCellValue(value, value === null ? 'NULL' : '')
 }
 function escapeHtml(value: unknown): string {
-  return value === null || value === undefined ? '' : String(value)
+  return formatCellValue(value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 function displayedValue(row: Record<string, unknown>, column: string): unknown {
@@ -787,7 +780,7 @@ function renderCell(value: unknown, row: Record<string, unknown>, column: Column
     : editedValues?.has(column.name) ? editedValues.get(column.name) : value
   if (editingCell.value?.rowKey === rowKey && editingCell.value.column === column.name) {
     return h(NInput, {
-      size: 'small', autofocus: true, defaultValue: current == null ? '' : String(current), placeholder: t('grid.inputNull'),
+      size: 'small', autofocus: true, defaultValue: formatCellValue(current), placeholder: t('grid.inputNull'),
       onBlur: (event: FocusEvent) => commitCell(rowKey, column.name, (event.target as HTMLInputElement).value, isNew),
       onKeyup: (event: KeyboardEvent) => { if (event.key === 'Enter') commitCell(rowKey, column.name, (event.target as HTMLInputElement).value, isNew) }
     })
@@ -799,7 +792,7 @@ function renderCell(value: unknown, row: Record<string, unknown>, column: Column
     class: [editable && 'grid-cell-editable', modified && 'grid-cell-edited'],
     onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', current),
     onDblclick: () => { if (editable) editingCell.value = { rowKey, column: column.name } }
-  }, current == null ? h(NText, { depth: 3 }, { default: () => t('common.nullValue') }) : String(current))
+  }, current == null ? h(NText, { depth: 3 }, { default: () => t('common.nullValue') }) : formatCellValue(current))
 }
 const tableColumns = computed<DataTableColumns<Record<string, unknown>>>(() => {
   if (!data.value) return []

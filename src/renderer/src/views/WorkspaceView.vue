@@ -219,7 +219,23 @@ onMounted(async () => {
   })
   // 开发模式主进程尚未重启时兼容旧 preload；正式构建始终提供该事件。
   if (typeof window.api.onMetadataChanged === 'function') {
-    stopMetadataChangedListener = window.api.onMetadataChanged((connectionId) => invalidateConnectionMetadata(connectionId))
+    stopMetadataChangedListener = window.api.onMetadataChanged((connectionId, droppedDatabase) => {
+      invalidateConnectionMetadata(connectionId)
+      if (droppedDatabase !== undefined) {
+        const connection = store.connections.find((item) => item.id === connectionId)
+        const matches = (database?: string): boolean => connection?.type === 'sqlserver'
+          ? database?.toLowerCase() === droppedDatabase.toLowerCase()
+          : database === droppedDatabase
+        // 保留查询草稿，明确其原目标库，避免清除默认库后在其他数据库执行。
+        if (matches(connection?.database)) {
+          for (const tab of store.tabs) {
+            if (tab.connectionId === connectionId && tab.type === 'query' && tab.database === undefined) tab.database = droppedDatabase
+          }
+        }
+        store.closeTabs(store.tabs.filter((tab) => tab.connectionId === connectionId && matches(tab.database) && tab.type !== 'query').map((tab) => tab.id))
+        void store.loadConnections().catch((error) => message.error(error instanceof Error ? error.message : String(error)))
+      }
+    })
   }
   try { await Promise.all([store.loadConnections(), store.loadSavedQueries()]) }
   catch (error) { message.error(error instanceof Error ? error.message : String(error)) }

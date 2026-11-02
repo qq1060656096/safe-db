@@ -240,12 +240,12 @@ export class RedisDriver implements DbDriver {
       cursor = response.cursor
       keys.push(...response.keys)
     } while (cursor !== '0' && keys.length < limit)
-    return keys.slice(0, limit).sort()
+    return [...new Set(keys)].slice(0, limit).sort()
   }
 
-  async listTables(database?: string, includeStats = false): Promise<TableInfo[]> {
+  async listTables(database?: string, includeStats = false, options?: { forExport?: boolean }): Promise<TableInfo[]> {
     const client = await this.clientFor(database)
-    const keys = await this.scanKeys(database)
+    const keys = await this.scanKeys(database, options?.forExport ? Infinity : 5000)
     const pipeline = client.multi()
     for (const key of keys) pipeline.sendCommand(['TYPE', key])
     const types = keys.length ? await pipeline.execAsPipeline() : []

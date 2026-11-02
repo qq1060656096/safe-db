@@ -373,6 +373,7 @@ export class AgentService {
     const sql = requiredString(params, 'sql')
     const response = await this.executor.execute(connection.id, sql, database)
     if (response.status === 'needsApproval' && response.approvalToken) {
+      const approvalSql = response.preview ?? sql
       const requestId = `req_${randomUUID()}`
       const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS).toISOString()
       const stored: StoredAgentRequest = {
@@ -381,7 +382,7 @@ export class AgentService {
         connectionId: connection.id,
         connectionName: connection.name,
         database,
-        sql,
+        sql: approvalSql,
         sqlKind: response.sqlKind ?? 'WRITE',
         expiresAt,
         status: 'pending'

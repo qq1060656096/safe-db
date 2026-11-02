@@ -44,7 +44,7 @@ buildSync({
   stdin: {
     contents: `
       export { AuditStore } from './src/main/store/audit'
-      export { configureExecutionTraceRecorder, runWithOperationContext } from './src/main/audit/trace'
+      export { configureExecutionTraceRecorder, runWithOperationContext, traceExecution } from './src/main/audit/trace'
       export { SqliteDriver } from './src/main/drivers/sqlite'
     `,
     resolveDir: root,
@@ -58,7 +58,7 @@ buildSync({
   logLevel: 'silent'
 })
 
-const { AuditStore, SqliteDriver, configureExecutionTraceRecorder, runWithOperationContext } = await import(bundle + '?t=' + Date.now())
+const { AuditStore, SqliteDriver, configureExecutionTraceRecorder, runWithOperationContext, traceExecution } = await import(bundle + '?t=' + Date.now())
 try {
   let store = new AuditStore(databasePath)
   configureExecutionTraceRecorder(store)
@@ -112,8 +112,17 @@ try {
       requestBody: { filter: { tenant_id: 'tenant-A' }, vector: [0.1, 0.2], apiKey: 'must-not-persist', Authorization: 'Bearer secret' }
     }
   })
+  store.recordExecutionTrace({
+    id: 'trace-error', operationId: 'operation-sensitive', spanId: 'span-error', parentSpanId: null,
+    sequence: 3, attempt: 1, protocol: 'sql', driverType: 'mysql', commandName: 'QUERY',
+    databaseName: 'main', status: 'error', returnedRows: null, matchedRows: null,
+    affectedRows: null, responseBytes: null, errorCode: 'ER_WRONG_FIELD_WITH_GROUP',
+    errorMessage: "Expression #3 is not in GROUP BY; mysql://report:never-store@db/main password='also-secret'",
+    startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 25_406,
+    sensitive: { statement: 'SELECT value FROM report GROUP BY category' }
+  })
   const traces = store.listExecutionTraces('operation-sensitive')
-  assert.deepEqual(traces.map((trace) => trace.sequence), [1, 2])
+  assert.deepEqual(traces.map((trace) => trace.sequence), [1, 2, 3])
   const sqlDetail = store.revealExecutionTrace('trace-sql')
   assert.deepEqual(sqlDetail.sensitive.parameters, ['tenant-A', 18])
   assert.deepEqual(sqlDetail.sensitive.parameterTypes, ['string', 'integer'])
@@ -122,10 +131,14 @@ try {
   assert.equal(qdrantDetail.sensitive.requestBody.apiKey, '[REDACTED]')
   assert.equal(qdrantDetail.sensitive.requestBody.Authorization, '[REDACTED]')
   assert.equal(qdrantDetail.sensitive.requestPath, '/points/query?api_key=%5BREDACTED%5D')
-  assert.deepEqual(store.verifyIntegrity(), { valid: true, checked: 3, failedTraceId: null })
+  const errorDetail = store.revealExecutionTrace('trace-error')
+  assert.match(errorDetail.sensitive.errorMessage, /Expression #3 is not in GROUP BY/)
+  assert.match(errorDetail.sensitive.errorMessage, /mysql:\/\/report:\[REDACTED\]@db\/main/)
+  assert.doesNotMatch(errorDetail.sensitive.errorMessage, /never-store|also-secret/)
+  assert.deepEqual(store.verifyIntegrity(), { valid: true, checked: 4, failedTraceId: null })
   store.recordExecutionTrace({
     id: 'trace-credential', operationId: 'operation-sensitive', spanId: 'span-credential', parentSpanId: null,
-    sequence: 3, attempt: 1, protocol: 'sql', driverType: 'postgres', commandName: 'QUERY',
+    sequence: 4, attempt: 1, protocol: 'sql', driverType: 'postgres', commandName: 'QUERY',
     databaseName: 'main', status: 'success', returnedRows: null, matchedRows: null,
     affectedRows: 1, responseBytes: null, errorCode: null, errorMessage: null,
     startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1,
@@ -168,6 +181,27 @@ try {
   assert.deepEqual(driverTraces.map((trace) => trace.sequence), driverTraces.map((_, index) => index + 1))
   assert.equal(store.verifyIntegrity().valid, true)
 
+  await runWithOperationContext('operation-timeout', async () => {
+    await assert.rejects(() => traceExecution({
+      protocol: 'sql', driverType: 'mysql', commandName: 'QUERY', databaseName: 'main',
+      sensitive: { statement: 'SELECT SLEEP(30)' }
+    }, async () => {
+      throw Object.assign(new Error('connect ETIMEDOUT authorization: Bearer never-store-token'), {
+        code: 'ETIMEDOUT'
+      })
+    }), /ETIMEDOUT/)
+    store.recordOperation({
+      eventId: 'operation-timeout', category: 'query', action: 'EXECUTE_QUERY',
+      connectionType: 'mysql', summary: '执行查询', status: 'error'
+    })
+  })
+  const timeoutTrace = store.listExecutionTraces('operation-timeout')[0]
+  assert.equal(timeoutTrace.status, 'timeout')
+  assert.equal(timeoutTrace.errorCode, 'ETIMEDOUT')
+  const timeoutDetail = store.revealExecutionTrace(timeoutTrace.id)
+  assert.match(timeoutDetail.sensitive.errorMessage, /connect ETIMEDOUT/)
+  assert.doesNotMatch(timeoutDetail.sensitive.errorMessage, /never-store-token/)
+
   const approval = {
     approvalId: 'approval-1',
     connectionId: 'conn-1',
@@ -196,7 +230,7 @@ try {
   // 重启后迁移保持幂等，旧日志不会被重复复制。
   store = new AuditStore(databasePath)
   operations = store.queryOperations({ page: 1, pageSize: 20 })
-  assert.equal(operations.total, 4)
+  assert.equal(operations.total, 5)
   store.close()
   console.log('✔ 双日志存储契约测试通过')
 } finally {

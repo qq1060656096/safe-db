@@ -84,6 +84,7 @@ try {
   let executed = 0
   const configs = {
     approval: { id: 'approval', name: 'approval', type: 'sqlite', permissionMode: 'approval' },
+    approvalMysql: { id: 'approvalMysql', name: 'approvalMysql', type: 'mysql', permissionMode: 'approval', database: 'test_data_1' },
     readonly: { id: 'readonly', name: 'readonly', type: 'sqlite', permissionMode: 'readonly' }
   }
   const executor = new Executor(
@@ -103,6 +104,25 @@ try {
       recordApproval: (row) => approvalRows.push(row)
     }
   )
+  const originalSql = '\n-- 保留审批说明\n  UPDATE items\n  SET amount = amount + 1\n  WHERE id = 1;\n'
+  const sqlApproval = await executor.execute('approval', originalSql, 'main')
+  assert.equal(sqlApproval.status, 'needsApproval')
+  assert.equal(sqlApproval.preview, originalSql)
+  assert.equal(approvalRows.at(-1).sqlText, originalSql)
+  await executor.rejectExecute(sqlApproval.approvalToken)
+
+  const gridApproval = await executor.executeOperation('approvalMysql', {
+    kind: 'records.mutate',
+    target: { kind: 'table', database: 'test_data_1', name: 'auto_distribution_record' },
+    mutations: [{ kind: 'insert', values: { company_id: '1' } }]
+  })
+  assert.equal(gridApproval.status, 'needsApproval')
+  assert.equal(
+    gridApproval.preview,
+    'INSERT INTO `test_data_1`.`auto_distribution_record` (`company_id`) VALUES (?);\n-- 参数: ["1"]'
+  )
+  await executor.rejectExecute(gridApproval.approvalToken)
+
   const approval = await executor.executeOperation('approval', {
     kind: 'records.clear', target: { kind: 'table', database: 'main', name: 'items' }
   })

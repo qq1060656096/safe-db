@@ -319,7 +319,7 @@ export class MysqlDriver implements DbDriver {
     return cols.filter((c) => c.isPrimaryKey).map((c) => c.name)
   }
 
-  async getTableData(qd: TableDataQuery): Promise<TableDataResult> {
+  async getTableData(qd: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult> {
     const db = qd.database || this.cfg.database
     if (!db) throw new Error('未指定数据库')
     const columns = await this.listColumns(db, qd.table)
@@ -347,7 +347,7 @@ export class MysqlDriver implements DbDriver {
     const total = Number((countRows as { n: number | string }[])[0].n)
     return {
       columns,
-      rows: sanitizeRows(rows as Record<string, unknown>[]),
+      rows: options?.rawValues ? rows as Record<string, unknown>[] : sanitizeRows(rows as Record<string, unknown>[]),
       total,
       editable: keyCols.length > 0,
       keyColumns: keyCols

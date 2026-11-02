@@ -266,8 +266,10 @@ watch(
 async function run(selectedSql?: string): Promise<boolean> {
   if (running.value || stopping.value) return false
   const selection = typeof selectedSql === 'string' ? selectedSql : sqlEditor.value?.getSelectedText() ?? ''
-  const sqlText = (selection.trim() || value.value.trim())
-  if (!sqlText || !props.tab.connectionId) return false
+  // trim 只用于判断是否有可执行内容；传入权限管道的必须是编辑器中的
+  // 原始文本（包括注释、换行和缩进），保证审批弹窗完整展示用户提交的 SQL。
+  const sqlText = selection.trim() ? selection : value.value
+  if (!sqlText.trim() || !props.tab.connectionId) return false
   executedSql.value = sqlText
   const generation = ++runGeneration
   running.value = true

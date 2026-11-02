@@ -240,7 +240,7 @@ export class SqliteDriver implements DbDriver {
     return withoutRowid ? [] : ['rowid']
   }
 
-  async getTableData(qd: TableDataQuery): Promise<TableDataResult> {
+  async getTableData(qd: TableDataQuery, options?: { rawValues?: boolean }): Promise<TableDataResult> {
     const d = this.requireDb()
     const dbName = qd.database ?? 'main'
     // 视图没有 rowid,不可编辑
@@ -256,7 +256,7 @@ export class SqliteDriver implements DbDriver {
 
     // rowid 作为定位键时一并查出
     const selectCols =
-      keyCols.length === 1 && keyCols[0] === 'rowid' ? `rowid AS "__rowid__", *` : '*'
+      !options?.rawValues && keyCols.length === 1 && keyCols[0] === 'rowid' ? `rowid AS "__rowid__", *` : '*'
     const where = buildWhereClause(qd.filters, quoteIdent, () => '?')
     let sql = `SELECT ${selectCols} FROM ${qualified}${where.sql}`
     if (qd.orderBy?.length) {
@@ -267,8 +267,9 @@ export class SqliteDriver implements DbDriver {
           .join(', ')
     }
     sql += ' LIMIT ? OFFSET ?'
-    const rows = d
-      .prepare(sql)
+    const statement = d.prepare(sql)
+    if (options?.rawValues) statement.safeIntegers(true)
+    const rows = statement
       .all(...where.params, qd.pageSize, (qd.page - 1) * qd.pageSize) as Record<
       string,
       unknown
@@ -278,7 +279,7 @@ export class SqliteDriver implements DbDriver {
       .get(...where.params) as { n: number }
     return {
       columns,
-      rows: sanitizeRows(rows),
+      rows: options?.rawValues ? rows : sanitizeRows(rows),
       total: totalRow.n,
       editable: keyCols.length > 0,
       keyColumns: keyCols[0] === 'rowid' ? ['__rowid__'] : keyCols

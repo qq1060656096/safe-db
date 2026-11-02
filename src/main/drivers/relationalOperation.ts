@@ -4,12 +4,57 @@ import type {
   TableColumnDefinition,
   TableColumnChange
 } from '../../shared/types'
+import { isSystemDatabase } from '../../shared/databasePolicy'
 
 export type RelationalDialect = 'mysql' | 'postgres' | 'sqlite' | 'sqlserver'
 
 export interface ParameterizedCommand {
   sql: string
   params: unknown[]
+}
+
+const OPERATION_PREVIEW_COMMAND_LIMIT = 20
+
+function compactPreviewParameter(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return value.length > 500 ? `${value.slice(0, 500)}…<${value.length} chars>` : value
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 20).map((item) => compactPreviewParameter(item, depth + 1))
+    return value.length > items.length ? [...items, `<${value.length - items.length} more items>`] : items
+  }
+  if (value === null || typeof value !== 'object' || depth > 8) return value
+  const entries = Object.entries(value)
+  const result = Object.fromEntries(entries.slice(0, 50).map(([key, item]) => [key, compactPreviewParameter(item, depth + 1)]))
+  if (entries.length > 50) result.__omittedFields = entries.length - 50
+  return result
+}
+
+function terminateSql(sql: string): string {
+  const value = sql.trimEnd()
+  return value.endsWith(';') ? value : `${value};`
+}
+
+/**
+ * 生成与关系型驱动实际执行一致的参数化 SQL 审批文本。
+ * 参数单独列出，不伪造成数据库并未真正收到的“内联 SQL”。
+ */
+export function relationalOperationPreview(
+  operation: DatabaseOperation,
+  dialect: RelationalDialect,
+  fallbackDatabase?: string
+): string {
+  const commands = compileRelationalOperation(operation, dialect, fallbackDatabase)
+  const visible = commands.slice(0, OPERATION_PREVIEW_COMMAND_LIMIT)
+  const blocks = visible.map((command, index) => {
+    const heading = commands.length > 1 ? `-- SQL ${index + 1}/${commands.length}\n` : ''
+    const params = command.params.length
+      ? `\n-- 参数: ${JSON.stringify(command.params.map((value) => compactPreviewParameter(value)))}`
+      : ''
+    return `${heading}${terminateSql(command.sql)}${params}`
+  })
+  if (commands.length > visible.length) {
+    blocks.push(`-- 其余 ${commands.length - visible.length} 条 SQL 未展示，确认后仍会全部执行`)
+  }
+  return blocks.join('\n\n')
 }
 
 export function quoteRelationalIdentifier(dialect: RelationalDialect, name: string): string {
@@ -150,6 +195,11 @@ export function compileRelationalOperation(
   dialect: RelationalDialect,
   fallbackDatabase?: string
 ): ParameterizedCommand[] {
+  if (operation.kind === 'database.drop') {
+    if (dialect === 'sqlite') throw new Error('SQLite 不支持删除数据库')
+    if (isSystemDatabase(dialect, operation.database)) throw new Error('不能删除系统数据库')
+    return [{ sql: `DROP DATABASE ${quoteRelationalIdentifier(dialect, operation.database)}`, params: [] }]
+  }
   if (operation.kind === 'records.mutate') return compileRecordCommands(operation, dialect, fallbackDatabase)
   if (operation.kind === 'records.clear') {
     return [{ sql: `DELETE FROM ${relationalTable(dialect, operation.target, fallbackDatabase)}`, params: [] }]

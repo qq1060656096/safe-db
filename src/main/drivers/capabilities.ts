@@ -19,7 +19,10 @@ function sqlCapabilities(type: Extract<DbType, 'mysql' | 'postgres' | 'sqlite' |
   return {
     recordModel: 'row',
     recordTargetKind: 'table',
-    databases: { create: sqlite ? unavailable('SQLite 数据库通过本地文件创建') : native() },
+    databases: {
+      create: sqlite ? unavailable('SQLite 数据库通过本地文件创建') : native(),
+      drop: sqlite ? unavailable('SQLite 数据库是本地文件，不支持 DROP DATABASE') : native()
+    },
     objectKinds: sqlite ? ['database', 'table', 'view'] : relationalKinds,
     records: {
       read: native(), insert: native({ requiresKey: false }), update: native({ requiresKey: true }),
@@ -42,7 +45,7 @@ export function capabilitiesForType(type: DbType): DriverCapabilities {
     return {
       recordModel: 'point',
       recordTargetKind: 'collection',
-      databases: { create: unavailable('Qdrant 没有数据库层级') },
+      databases: { create: unavailable('Qdrant 没有数据库层级'), drop: unavailable('Qdrant 没有数据库层级') },
       objectKinds: ['collection', 'payloadIndex'],
       records: {
         read: native(), insert: native({ maxBatchSize: 1_000 }), update: native({ requiresKey: true, maxBatchSize: 1_000 }),
@@ -61,7 +64,7 @@ export function capabilitiesForType(type: DbType): DriverCapabilities {
     return {
       recordModel: 'document',
       recordTargetKind: 'collection',
-      databases: { create: unavailable('MongoDB 数据库在首次创建 Collection 或写入时隐式创建') },
+      databases: { create: unavailable('MongoDB 数据库在首次创建 Collection 或写入时隐式创建'), drop: native() },
       objectKinds: ['database', 'collection'],
       records: {
         read: native(), insert: native({ maxBatchSize: 50_000 }), update: native({ requiresKey: true, maxBatchSize: 50_000 }),
@@ -77,7 +80,10 @@ export function capabilitiesForType(type: DbType): DriverCapabilities {
   return {
     recordModel: 'key-entry',
     recordTargetKind: 'key',
-    databases: { create: unavailable('Redis 逻辑数据库由服务端配置决定') },
+    databases: {
+      create: unavailable('Redis 逻辑数据库由服务端配置决定'),
+      drop: unavailable('Redis 逻辑数据库不能删除，清空数据需使用 FLUSHDB')
+    },
     objectKinds: ['database', 'key'],
     records: {
       read: native(), insert: native({ maxBatchSize: 50_000 }), update: native({ requiresKey: true, maxBatchSize: 50_000 }),

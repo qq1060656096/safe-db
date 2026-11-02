@@ -1,9 +1,26 @@
 import type { ColumnFilter, ColumnInfo } from '../../shared/types'
 
+/**
+ * 把数据库单元格值转换为可读文本。PostgreSQL 的 json/jsonb（以及其他驱动的
+ * 结构化值）会以对象或数组返回，直接 String(value) 会丢失内容并显示成
+ * `[object Object]`。
+ */
+export function formatCellValue(value: unknown, nullValue = ''): string {
+  if (value === null || value === undefined) return nullValue
+  if (typeof value === 'object') {
+    try {
+      const json = JSON.stringify(value)
+      if (json !== undefined) return json
+    } catch {
+      // 极少数不可序列化对象回退到其字符串表示，避免影响整张结果表渲染。
+    }
+  }
+  return String(value)
+}
+
 /** CSV 单元格转义:含引号/逗号/换行时用双引号包裹并双写内部引号 */
 function csvCell(v: unknown): string {
-  if (v === null || v === undefined) return ''
-  const s = String(v)
+  const s = formatCellValue(v)
   if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
   return s
 }

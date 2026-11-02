@@ -138,6 +138,63 @@ function scrubStatement(value: string | undefined): { statement?: string; contai
   return { statement, containsCredential: true }
 }
 
+const MAX_ERROR_MESSAGE_LENGTH = 8_192
+
+/**
+ * 驱动错误是定位超时、断线和 SQL 错误的唯一直接证据，因此允许随敏感明细加密保存；
+ * 但连接串、认证头和常见凭据赋值必须在进入持久化层前移除。
+ */
+export function sanitizeErrorMessage(error: unknown): string | null {
+  if (error === undefined || error === null) return null
+  const value = error as { message?: unknown }
+  const raw = value && typeof value === 'object' && value.message !== undefined
+    ? String(value.message)
+    : String(error)
+  if (!raw) return null
+
+  let message = scrubStatement(raw).statement ?? raw
+  // URI 中的 user:password（例如 mysql://user:secret@host）。保留用户名便于定位连接。
+  message = message.replace(
+    /\b([a-z][a-z\d+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi,
+    '$1$2:[REDACTED]@'
+  )
+  // HTTP Authorization 头以及日志中常见的 Bearer / Basic 认证值。
+  message = message.replace(
+    /(\b(?:proxy[-_ ]?authorization|authorization)\b\s*[:=]\s*)(?:Bearer|Basic)\s+[^\s,;]+/gi,
+    '$1[REDACTED]'
+  )
+  // key=value、key: value 和 JSON 风格的凭据字段。
+  message = message.replace(
+    /(\b(?:password|passwd|pwd|passphrase|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|session[-_ ]?token|private[-_ ]?key|client[-_ ]?secret)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;]+)/gi,
+    '$1[REDACTED]'
+  )
+
+  return message.length <= MAX_ERROR_MESSAGE_LENGTH
+    ? message
+    : `${message.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…[已截断]`
+}
+
+function executionErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null
+  const value = error as { code?: unknown; errno?: unknown; sqlState?: unknown; name?: unknown }
+  if (value.code !== undefined && value.code !== null && String(value.code)) return String(value.code)
+  if (value.errno !== undefined && value.errno !== null && String(value.errno)) return String(value.errno)
+  if (value.sqlState !== undefined && value.sqlState !== null && String(value.sqlState)) return String(value.sqlState)
+  const name = value.name === undefined ? '' : String(value.name)
+  return name && name !== 'Error' ? name : null
+}
+
+function executionErrorStatus(error: unknown): ExecutionTraceStatus {
+  if (!error || typeof error !== 'object') return 'error'
+  const value = error as { code?: unknown; name?: unknown; message?: unknown }
+  const name = value.name === undefined ? '' : String(value.name)
+  if (name === 'AbortError') return 'canceled'
+  const signature = `${String(value.code ?? '')} ${name} ${String(value.message ?? '')}`
+  return /(?:^|\W)(?:ETIMEDOUT|ESOCKETTIMEDOUT|PROTOCOL_SEQUENCE_TIMEOUT|TIMEOUT)(?:\W|$)|timed?\s*out/i.test(signature)
+    ? 'timeout'
+    : 'error'
+}
+
 /** 认证凭据永不进入持久化层；其他业务敏感数据保留原值并由存储层加密。 */
 export function sanitizeSensitiveContent(content: ExecutionTraceSensitiveContent): ExecutionTraceSensitiveContent {
   const statement = scrubStatement(content.statement)
@@ -205,7 +262,6 @@ export function finishExternalExecution(
 ): void {
   if (!handle || !recorder) return
   const finished = Date.now()
-  const value = error as { code?: unknown; message?: unknown } | undefined
   recorder.recordExecutionTrace({
     ...handle.record,
     status,
@@ -213,8 +269,8 @@ export function finishExternalExecution(
     matchedRows: metrics.matchedRows ?? null,
     affectedRows: metrics.affectedRows ?? null,
     responseBytes: metrics.responseBytes ?? null,
-    errorCode: value?.code === undefined ? null : String(value.code),
-    errorMessage: value?.message === undefined ? error === undefined ? null : String(error) : String(value.message),
+    errorCode: executionErrorCode(error),
+    errorMessage: sanitizeErrorMessage(error),
     finishedAt: new Date(finished).toISOString(),
     durationMs: finished - handle.started
   })
@@ -231,8 +287,7 @@ export async function traceExecution<T>(
     finishExternalExecution(handle, 'success', metrics?.(result) ?? {})
     return result
   } catch (error) {
-    const name = error instanceof Error ? error.name : ''
-    finishExternalExecution(handle, name === 'AbortError' ? 'canceled' : 'error', {}, error)
+    finishExternalExecution(handle, executionErrorStatus(error), {}, error)
     throw error
   }
 }

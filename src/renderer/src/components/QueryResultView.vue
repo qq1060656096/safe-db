@@ -7,7 +7,7 @@ import type { DbType, QueryResult } from '../../../shared/types'
 import { useColumnOrder } from '../columnOrder'
 import { useContextMenuDismiss } from '../contextMenu'
 import { DEFAULT_COLUMN_WIDTH, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, queryColumnLayoutScope, useLayoutStore } from '../stores/layout'
-import { toCsv, toJson } from '../utils'
+import { formatCellValue, toCsv, toJson } from '../utils'
 
 const props = defineProps<{
   result: QueryResult
@@ -95,7 +95,7 @@ const columns = computed<DataTableColumns<Record<string, unknown>>>(() =>
           onContextmenu: (event: MouseEvent) => openColumnMenu(event, column.name, 'cell', row[column.name])
         }, row[column.name] === null
           ? [h(NText, { depth: 3 }, { default: () => t('common.nullValue') })]
-          : String(row[column.name] ?? ''))
+          : formatCellValue(row[column.name]))
       }]
     })
   ]
@@ -292,13 +292,7 @@ function updateColumnSelection(event: MouseEvent, column: string, preserveSelect
 }
 
 function clipboardValue(value: unknown): string {
-  if (value === null) return 'NULL'
-  if (value === undefined) return ''
-  if (typeof value === 'object') {
-    try { return JSON.stringify(value) }
-    catch { return String(value) }
-  }
-  return String(value)
+  return formatCellValue(value, value === null ? 'NULL' : '')
 }
 
 async function copyColumnItem(action: string | number): Promise<void> {
@@ -366,7 +360,7 @@ function sqlLiteral(value: unknown): string {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number' && Number.isFinite(value)) return String(value)
   if (typeof value === 'boolean') return props.dbType === 'postgres' ? (value ? 'TRUE' : 'FALSE') : (value ? '1' : '0')
-  return "'" + String(value).replace(/'/g, "''") + "'"
+  return "'" + formatCellValue(value).replace(/'/g, "''") + "'"
 }
 
 function whereCondition(column: string, value: unknown): string {
@@ -410,13 +404,12 @@ async function buildSql(kind: 'select' | 'insert' | 'update' | 'delete'): Promis
 }
 
 function tableCell(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  const text = String(value)
+  const text = formatCellValue(value)
   return /[\t\r\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
 function escapeHtml(value: unknown): string {
-  return value === null || value === undefined ? '' : String(value)
+  return formatCellValue(value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 

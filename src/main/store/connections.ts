@@ -115,6 +115,33 @@ export class ConnectionStore {
     return this.connections.map((c) => this.toMeta(c))
   }
 
+  /**
+   * 持久化连接在侧边栏中的顺序。只接受当前连接 ID 的完整排列，
+   * 避免过期窗口覆盖掉其他窗口刚刚新建或删除的连接。
+   */
+  reorder(ids: string[]): ConnectionMeta[] {
+    if (!Array.isArray(ids)) throw new Error('连接排序参数无效')
+    const uniqueIds = new Set(ids)
+    const currentById = new Map(this.connections.map((connection) => [connection.id, connection]))
+    if (ids.length !== this.connections.length || uniqueIds.size !== ids.length
+      || ids.some((id) => !currentById.has(id))) {
+      throw new Error('连接列表已变化，请刷新后重试')
+    }
+
+    const reordered = ids.map((id) => currentById.get(id)!)
+    if (reordered.every((connection, index) => connection === this.connections[index])) return this.list()
+
+    const previous = this.connections
+    this.connections = reordered
+    try {
+      this.persist()
+    } catch (error) {
+      this.connections = previous
+      throw error
+    }
+    return this.list()
+  }
+
   /** 仅供导出使用：返回完整连接信息，凭据保持为 safeStorage 密文。 */
   listEncrypted(): ConnectionConfig[] {
     return this.connections.map((connection) => ({

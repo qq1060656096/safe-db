@@ -7,6 +7,7 @@ import type {
   ConnectionConfig,
   DatabaseOperation,
   ExportOptions,
+  DatabaseExportOptions,
   OperationLogFilter,
   SavedQueryInput,
   TableDataQuery
@@ -27,7 +28,7 @@ const api: Api = {
     return () => ipcRenderer.removeListener('data:changed', handler)
   },
   onMetadataChanged: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, connectionId: string) => listener(connectionId)
+    const handler = (_event: Electron.IpcRendererEvent, connectionId: string, droppedDatabase?: string) => listener(connectionId, droppedDatabase)
     ipcRenderer.on('metadata:changed', handler)
     return () => ipcRenderer.removeListener('metadata:changed', handler)
   },
@@ -39,6 +40,7 @@ const api: Api = {
 
   // 连接管理
   listConnections: () => ipcRenderer.invoke('connections:list'),
+  reorderConnections: (ids: string[]) => ipcRenderer.invoke('connections:reorder', ids),
   saveConnection: (cfg: ConnectionConfig) => ipcRenderer.invoke('connections:save', cfg),
   duplicateConnection: (id: string, name: string) => ipcRenderer.invoke('connections:duplicate', id, name),
   deleteConnection: (id: string) => ipcRenderer.invoke('connections:delete', id),
@@ -94,7 +96,8 @@ const api: Api = {
   purgeAuditLogs: (retentionDays: number) => ipcRenderer.invoke('audit:purge', retentionDays),
 
   // 导出
-  exportData: (opts: ExportOptions) => ipcRenderer.invoke('export:save', opts)
+  exportData: (opts: ExportOptions) => ipcRenderer.invoke('export:save', opts),
+  exportDatabase: (opts: DatabaseExportOptions) => ipcRenderer.invoke('export:database', opts)
 }
 
 contextBridge.exposeInMainWorld('api', api)

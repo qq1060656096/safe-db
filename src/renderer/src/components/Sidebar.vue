@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
-import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UndoOutlined, UnlockOutlined } from '@vicons/antd'
+import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, HolderOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UndoOutlined, UnlockOutlined } from '@vicons/antd'
 import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { ConnectionMeta, DatabaseOperation, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import type { ConnectionMeta, DatabaseExportMode, DatabaseOperation, PermissionMode, RoutineInfo, SavedQuery, TableInfo } from '../../../shared/types'
+import { isSystemDatabase } from '../../../shared/databasePolicy'
 import { useContextMenuDismiss } from '../contextMenu'
 import { isAppLocale, localeOptions } from '../i18n'
 import { invalidateConnectionMetadata, loadColumnMetadata, loadDatabaseMetadata, loadTableMetadata } from '../metadataCache'
@@ -13,6 +14,7 @@ import { useLayoutStore } from '../stores/layout'
 import { useSettingsStore } from '../stores/settings'
 import { toCsv, toJson } from '../utils'
 import ConnectionDialog from './ConnectionDialog.vue'
+import ConnectionExportDialog from './ConnectionExportDialog.vue'
 import DatabaseTypeIcon from './DatabaseTypeIcon.vue'
 
 type NodeData =
@@ -39,12 +41,24 @@ const expandedKeys = ref<TreeKey[]>([])
 const selectedKeys = ref<TreeKey[]>([])
 const dialogOpen = ref(false)
 const editing = ref<ConnectionMeta | null>(null)
+const exportConnection = ref<ConnectionMeta | null>(null)
+const exportMode = ref<DatabaseExportMode>('data')
 const contextMenuShow = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuNode = ref<DbTreeNode | null>(null)
 const permissionChangingId = ref<string | null>(null)
 const duplicatingConnectionId = ref<string | null>(null)
+const draggingConnectionId = ref<string | null>(null)
+const connectionDropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null)
+const reorderingConnections = ref(false)
+interface ArmedConnectionRowDrag {
+  element: HTMLElement
+  start: (event: DragEvent) => void
+  end: () => void
+  cancel: () => void
+}
+let armedConnectionRowDrag: ArmedConnectionRowDrag | null = null
 type ConnectionActivity = 'connecting' | 'refreshing'
 const connectionActivities = ref<Record<string, ConnectionActivity>>({})
 const copyModalOpen = ref(false)
@@ -56,6 +70,10 @@ const createDatabaseModalOpen = ref(false)
 const createDatabaseConnectionId = ref<string | null>(null)
 const createDatabaseName = ref('')
 const creatingDatabase = ref(false)
+const dropDatabaseTarget = ref<Extract<NodeData, { kind: 'database' }> | null>(null)
+const dropDatabaseConfirmation = ref('')
+const droppingDatabase = ref(false)
+const dropDatabaseConnection = computed(() => dropDatabaseTarget.value ? connectionOf(dropDatabaseTarget.value.connectionId) : undefined)
 const createCollectionModalOpen = ref(false)
 const createCollectionConnectionId = ref<string | null>(null)
 const createCollectionDatabase = ref<string | undefined>()
@@ -629,7 +647,11 @@ async function runTableAction(connection: ConnectionMeta, node: Extract<NodeData
   }
 }
 async function onConnectionAction(connection: ConnectionMeta, action: string): Promise<void> {
-  if (action === 'connect') await openConnection(connection.id)
+  if (['export-data', 'export-structure', 'export-structure-and-data'].includes(action)) {
+    exportMode.value = action.slice('export-'.length) as DatabaseExportMode
+    exportConnection.value = connection
+  }
+  else if (action === 'connect') await openConnection(connection.id)
   else if (action === 'query') store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: connection.name }), connectionId: connection.id })
   else if (action === 'newCollection') openCreateCollection(connection)
   else if (action === 'newKey') openCreateKey(connection, connection.database)
@@ -692,6 +714,12 @@ function connectionOptions(connection: ConnectionMeta): DropdownOption[] {
     { key: 'edit', label: t('sidebar.editConnection'), disabled: busy, icon: () => h(NIcon, null, { default: () => h(EditOutlined) }) },
     { key: 'copy-name', label: t('sidebar.copyObjectName'), icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
     { key: 'duplicate', label: t('sidebar.copyConnection'), disabled: duplicatingConnectionId.value !== null, icon: () => h(NIcon, null, { default: () => h(CopyOutlined) }) },
+    { type: 'divider', key: 'export-divider' },
+    ...(['data', 'structure', 'structure-and-data'] as DatabaseExportMode[]).map((mode) => ({
+      key: `export-${mode}`, label: t(mode === 'data' ? 'sidebar.exportData' : mode === 'structure' ? 'sidebar.exportStructure' : 'sidebar.exportStructureAndData'),
+      disabled: busy || exportConnection.value !== null,
+      icon: () => h(NIcon, null, { default: () => h(ExportOutlined) })
+    })),
     { key: 'disconnect', label: t('sidebar.disconnect'), disabled: !connected || busy, icon: () => h(NIcon, null, { default: () => h(DisconnectOutlined) }) },
     { type: 'divider', key: 'divider' },
     { key: 'delete', label: t('sidebar.deleteConnection'), disabled: busy, icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) }) }
@@ -872,6 +900,10 @@ function onNodeAction(node: DbTreeNode, action: string | number): void {
     else if (key === 'newCollection') { const connection = connectionOf(node.data.connectionId); if (connection) openCreateCollection(connection, node.data.database) }
     else if (key === 'newKey') { const connection = connectionOf(node.data.connectionId); if (connection) openCreateKey(connection, node.data.database) }
     else if (key === 'refresh') refreshDatabaseTree(node.data.connectionId, node.data.database)
+    else if (key === 'dropDatabase') {
+      dropDatabaseTarget.value = node.data
+      dropDatabaseConfirmation.value = ''
+    }
     return
   }
   if (node.data.kind === 'schema') {
@@ -930,12 +962,20 @@ function nodeOptions(node: DbTreeNode): DropdownOption[] {
   ]
   if (node.data.kind === 'database') {
     const connection = connectionOf(node.data.connectionId)
+    const systemDatabase = connection && isSystemDatabase(connection.type, node.data.database)
     return [
       { key: 'query', label: t('sidebar.newQuery'), icon: () => h(NIcon, null, { default: () => h(CodeOutlined) }) },
       { key: 'refresh', label: t('common.refresh'), icon: () => h(NIcon, null, { default: () => h(ReloadOutlined) }) },
       ...(capabilitiesOf(connection)?.objectKinds.includes('table') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newTable', label: t('sidebar.newTable'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : []),
       ...(capabilitiesOf(connection)?.objectKinds.includes('collection') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newCollection', label: t('sidebar.newCollection'), icon: () => h(NIcon, null, { default: () => h(TableOutlined) }) }] : []),
-      ...(capabilitiesOf(connection)?.objectKinds.includes('key') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newKey', label: t('sidebar.newKey'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) }] : [])
+      ...(capabilitiesOf(connection)?.objectKinds.includes('key') && capabilitiesOf(connection)?.objects.create.supported ? [{ key: 'newKey', label: t('sidebar.newKey'), icon: () => h(NIcon, null, { default: () => h(PlusOutlined) }) }] : []),
+      { type: 'divider', key: 'database-drop-divider' },
+      {
+        key: 'dropDatabase', label: t('sidebar.dropDatabase'),
+        disabled: !capabilitiesOf(connection)?.databases.drop.supported || connection?.permissionMode === 'readonly' || systemDatabase || droppingDatabase.value,
+        props: { title: systemDatabase ? t('sidebar.dropSystemDatabaseBlocked') : !capabilitiesOf(connection)?.databases.drop.supported ? t('sidebar.dropDatabaseUnsupported') : '' },
+        icon: () => h(NIcon, { color: '#d03050' }, { default: () => h(DeleteOutlined) })
+      }
     ]
   }
   if (node.data.kind === 'schema') return [
@@ -998,16 +1038,124 @@ function openNodeContextMenu(event: MouseEvent, node: DbTreeNode): void {
   contextMenuY.value = event.clientY
   contextMenuShow.value = true
 }
-function treeNodeProps({ option }: { option: TreeOption }): { onContextmenu: (event: MouseEvent) => void } {
+function startConnectionDrag(event: DragEvent, connectionId: string): void {
+  if (reorderingConnections.value || store.connections.length < 2) {
+    event.preventDefault()
+    return
+  }
+  draggingConnectionId.value = connectionId
+  connectionDropTarget.value = null
+  contextMenuShow.value = false
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', connectionId)
+  }
+}
+function finishConnectionDrag(): void {
+  draggingConnectionId.value = null
+  connectionDropTarget.value = null
+}
+function disarmConnectionRowDrag(): void {
+  const armed = armedConnectionRowDrag
+  if (!armed) return
+  armed.element.draggable = false
+  armed.element.removeEventListener('dragstart', armed.start)
+  armed.element.removeEventListener('dragend', armed.end)
+  window.removeEventListener('mouseup', armed.cancel)
+  window.removeEventListener('blur', armed.cancel)
+  armedConnectionRowDrag = null
+}
+function armConnectionRowDrag(event: MouseEvent, connectionId: string): void {
+  if (event.button !== 0 || reorderingConnections.value || store.connections.length < 2) return
+  if (event.target instanceof Element && event.target.closest('.n-tree-node-switcher, button, input, textarea, select, .connection-permission-editable')) return
+
+  disarmConnectionRowDrag()
+  const element = event.currentTarget as HTMLElement
+  const start = (dragEvent: DragEvent): void => startConnectionDrag(dragEvent, connectionId)
+  const end = (): void => {
+    finishConnectionDrag()
+    disarmConnectionRowDrag()
+  }
+  const cancel = (): void => disarmConnectionRowDrag()
+  armedConnectionRowDrag = { element, start, end, cancel }
+  element.draggable = true
+  element.addEventListener('dragstart', start)
+  element.addEventListener('dragend', end)
+  window.addEventListener('mouseup', cancel)
+  window.addEventListener('blur', cancel)
+}
+function connectionDropPosition(event: DragEvent): 'before' | 'after' {
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  return event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after'
+}
+function dragConnectionOver(event: DragEvent, targetId: string): void {
+  const sourceId = draggingConnectionId.value
+  if (!sourceId || sourceId === targetId || reorderingConnections.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  connectionDropTarget.value = { id: targetId, position: connectionDropPosition(event) }
+}
+function leaveConnectionDropTarget(event: DragEvent, targetId: string): void {
+  const current = event.currentTarget as HTMLElement
+  if (event.relatedTarget instanceof Node && current.contains(event.relatedTarget)) return
+  if (connectionDropTarget.value?.id === targetId) connectionDropTarget.value = null
+}
+async function dropConnection(event: DragEvent, targetId: string): Promise<void> {
+  const sourceId = draggingConnectionId.value
+  if (!sourceId || sourceId === targetId || reorderingConnections.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  const position = connectionDropTarget.value?.id === targetId
+    ? connectionDropTarget.value.position
+    : connectionDropPosition(event)
+  finishConnectionDrag()
+
+  const currentIds = store.connections.map((connection) => connection.id)
+  const reorderedIds = currentIds.filter((id) => id !== sourceId)
+  const targetIndex = reorderedIds.indexOf(targetId)
+  if (targetIndex < 0) return
+  reorderedIds.splice(targetIndex + (position === 'after' ? 1 : 0), 0, sourceId)
+  if (reorderedIds.every((id, index) => id === currentIds[index])) return
+
+  reorderingConnections.value = true
+  try {
+    await store.reorderConnections(reorderedIds)
+  } catch (error) {
+    await store.loadConnections().catch(() => undefined)
+    message.error(t('sidebar.reorderConnectionsFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    reorderingConnections.value = false
+  }
+}
+function treeNodeProps({ option }: { option: TreeOption }): Record<string, unknown> {
   const node = option as DbTreeNode
-  return { onContextmenu: (event: MouseEvent) => openNodeContextMenu(event, node) }
+  const props: Record<string, unknown> = { onContextmenu: (event: MouseEvent) => openNodeContextMenu(event, node) }
+  if (node.data.kind !== 'connection') return props
+  const connectionId = node.data.connectionId
+  return {
+    ...props,
+    class: [
+      'connection-tree-node',
+      {
+        'is-connection-dragging': draggingConnectionId.value === connectionId,
+        'is-connection-drop-before': connectionDropTarget.value?.id === connectionId && connectionDropTarget.value.position === 'before',
+        'is-connection-drop-after': connectionDropTarget.value?.id === connectionId && connectionDropTarget.value.position === 'after'
+      }
+    ],
+    onMousedown: (event: MouseEvent) => armConnectionRowDrag(event, connectionId),
+    onDragover: (event: DragEvent) => dragConnectionOver(event, connectionId),
+    onDragleave: (event: DragEvent) => leaveConnectionDropTarget(event, connectionId),
+    onDrop: (event: DragEvent) => { void dropConnection(event, connectionId) }
+  }
 }
 function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
   const node = option as DbTreeNode
   let content: ReturnType<typeof h>
   if (node.data.kind === 'connection') {
-    const connection = connectionOf(node.data.connectionId)
-    const activity = connectionActivityOf(node.data.connectionId)
+    const connectionId = node.data.connectionId
+    const connection = connectionOf(connectionId)
+    const activity = connectionActivityOf(connectionId)
     const permissionTag = connection
       ? h(NTag, { type: permissionType[connection.permissionMode], size: 'tiny' }, { default: () => t(`permission.${connection.permissionMode}`) })
       : null
@@ -1033,7 +1181,14 @@ function renderLabel({ option }: { option: TreeOption }): ReturnType<typeof h> {
             ])
           })
         : null
+    const canReorder = store.connections.length > 1 && !reorderingConnections.value
     content = h('span', { class: 'tree-node-title', onDblclick: (event: MouseEvent) => onNodeDoubleClick(event, node) }, [
+      h('span', {
+        class: ['connection-drag-handle', { 'is-disabled': !canReorder }],
+        title: t('sidebar.connectionDragHandle'),
+        'aria-label': t('sidebar.connectionDragHandle'),
+        onDblclick: (event: MouseEvent) => event.stopPropagation()
+      }, [h(NIcon, { size: 13 }, { default: () => h(HolderOutlined) })]),
       h('span', { class: 'connection-name', title: connection?.name ?? '' }, connection?.name ?? ''),
       activity ? h('span', { class: 'connection-activity-status', 'aria-live': 'polite' }, t(`sidebar.${activity}`)) : null,
       permissionControl
@@ -1134,7 +1289,10 @@ watch(search, (keyword) => {
     void Promise.all(loads).catch(() => undefined)
   }, 250)
 })
-onBeforeUnmount(() => { if (searchMetadataTimer) clearTimeout(searchMetadataTimer) })
+onBeforeUnmount(() => {
+  if (searchMetadataTimer) clearTimeout(searchMetadataTimer)
+  disarmConnectionRowDrag()
+})
 function collapseAll(): void { expandedKeys.value = [] }
 function openNewConnection(): void { editing.value = null; dialogOpen.value = true }
 function closeDialog(): void { dialogOpen.value = false; editing.value = null }
@@ -1275,6 +1433,42 @@ function openNewQuery(connectionId: string | number): void {
   const connection = connectionOf(String(connectionId))
   if (connection) store.openTab({ type: 'query', title: t('sidebar.queryTitle', { name: connection.name }), connectionId: connection.id })
 }
+function closeDropDatabase(): void {
+  if (droppingDatabase.value) return
+  dropDatabaseTarget.value = null
+  dropDatabaseConfirmation.value = ''
+}
+async function confirmDropDatabase(): Promise<void> {
+  const target = dropDatabaseTarget.value
+  const connection = target ? connectionOf(target.connectionId) : undefined
+  if (!target || !connection || droppingDatabase.value || dropDatabaseConfirmation.value !== target.database) return
+  droppingDatabase.value = true
+  try {
+    const result = await store.executeOperationWithApproval(connection.id, { kind: 'database.drop', database: target.database })
+    if (result.status === 'ok') {
+      dropDatabaseTarget.value = null
+      dropDatabaseConfirmation.value = ''
+      message.success(t('sidebar.databaseDropped', { name: target.database }))
+    } else if (result.status === 'denied') message.warning(result.error ?? '')
+    else if (result.status === 'error') message.error(t('sidebar.dropDatabaseFailed', { error: result.error ?? '' }))
+  } catch (error) {
+    message.error(t('sidebar.dropDatabaseFailed', { error: error instanceof Error ? error.message : String(error) }))
+  } finally {
+    droppingDatabase.value = false
+  }
+}
+
+// 删除事件也可能来自其他窗口；及时移除已不存在的数据库节点并刷新连接。
+const stopDatabaseDropListener = window.api.onMetadataChanged?.((connectionId, droppedDatabase) => {
+  if (droppedDatabase === undefined) return
+  const connection = connectionOf(connectionId)
+  const remove = (nodes: DbTreeNode[]): DbTreeNode[] => nodes
+    .filter((node) => !(node.data.kind === 'database' && node.data.connectionId === connectionId && (connection?.type === 'sqlserver' ? node.data.database.toLowerCase() === droppedDatabase.toLowerCase() : node.data.database === droppedDatabase)))
+    .map((node) => node.children ? { ...node, children: remove(node.children) } : node)
+  treeData.value = remove(treeData.value)
+  void store.loadConnections().then(() => openConnection(connectionId, true)).catch((error) => message.error(error instanceof Error ? error.message : String(error)))
+}) ?? (() => {})
+onBeforeUnmount(stopDatabaseDropListener)
 async function transferConnections(action: string | number): Promise<void> {
   if (isAppLocale(action)) { selectLocale(action); return }
   if (action === 'reset-current-layout' || action === 'reset-all-layout') {
@@ -1339,6 +1533,21 @@ function selectContextMenu(key: string | number): void {
     <div class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" :node-props="treeNodeProps" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
     <NDropdown trigger="manual" placement="bottom-start" :show="contextMenuShow" :x="contextMenuX" :y="contextMenuY" :options="contextMenuOptions" @select="selectContextMenu" @clickoutside="contextMenuShow = false" />
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
+    <NModal :show="!!dropDatabaseTarget" :mask-closable="!droppingDatabase" :close-on-esc="!droppingDatabase" @update:show="(show) => { if (!show) closeDropDatabase() }">
+      <NCard class="copy-table-modal" :title="t('sidebar.dropDatabaseTitle', { name: dropDatabaseTarget?.database ?? '' })" :closable="!droppingDatabase" @close="closeDropDatabase">
+        <p>{{ t('sidebar.targetConnectionName') }}：{{ dropDatabaseConnection?.name }}</p>
+        <p v-if="dropDatabaseConnection">{{ t('sidebar.targetServerAddress') }}：{{ connectionEndpoint(dropDatabaseConnection) }}</p>
+        <p>{{ t('sidebar.dropDatabaseHint') }}</p>
+        <NFormItem :label="t('sidebar.dropDatabaseConfirmLabel', { name: dropDatabaseTarget?.database ?? '' })" required>
+          <NInput v-model:value="dropDatabaseConfirmation" autofocus :disabled="droppingDatabase" @keyup.enter="confirmDropDatabase" />
+        </NFormItem>
+        <template #footer><div class="modal-actions">
+          <NButton :disabled="droppingDatabase" @click="closeDropDatabase">{{ t('common.cancel') }}</NButton>
+          <NButton type="error" :loading="droppingDatabase" :disabled="dropDatabaseConfirmation !== dropDatabaseTarget?.database" @click="confirmDropDatabase">{{ t('sidebar.dropDatabase') }}</NButton>
+        </div></template>
+      </NCard>
+    </NModal>
+    <ConnectionExportDialog :connection="exportConnection" :mode="exportMode" @close="exportConnection = null" @connected="(id) => store.setConnected(id, true)" />
     <NModal :show="createDatabaseModalOpen" :mask-closable="!creatingDatabase" @update:show="(show) => { if (!show) closeCreateDatabase() }">
       <NCard class="copy-table-modal" :title="t('sidebar.newDatabase')" closable @close="closeCreateDatabase">
         <NFormItem v-if="createDatabaseConnection" :label="t('sidebar.targetInstance')">

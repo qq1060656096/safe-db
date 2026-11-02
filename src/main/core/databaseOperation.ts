@@ -49,6 +49,10 @@ export function assertDatabaseOperation(value: unknown): asserts value is Databa
   if (!operation || typeof operation.kind !== 'string') throw new Error('结构化操作无效')
   // 先约束整个 IPC 输入，未知字段也不能绕过深度和体积限制。
   assertSerializable(operation)
+  if (operation.kind === 'database.drop') {
+    assertName(operation.database, '数据库名称')
+    return
+  }
   if (operation.kind === 'records.mutate') {
     assertTarget(operation.target)
     if (!Array.isArray(operation.mutations) || operation.mutations.length === 0) throw new Error('记录变更不能为空')
@@ -142,6 +146,7 @@ export function operationSupports(
   operation: DatabaseOperation
 ): OperationSupport[] {
   if (!capabilities.structuredOperations) throw new Error('当前驱动尚未开放结构化操作')
+  if (operation.kind === 'database.drop') return [capabilities.databases.drop]
   if (operation.kind === 'records.mutate') {
     assertDomainTarget(capabilities, operation.target, '记录变更')
     const supports: OperationSupport[] = []
