@@ -22,6 +22,36 @@ import { capabilitiesForType } from './capabilities'
 import { compileRelationalOperation } from './relationalOperation'
 import { traceExecution } from '../audit/trace'
 
+const QUERY_CANCELED_MESSAGE = '查询已取消'
+const CONNECTION_CLOSED_MESSAGE = '数据库连接已断开，执行已中断'
+/**
+ * 多语句事务按批发送，避免几百条语句逐条往返（经 SSH 隧道访问云数据库时每条约百毫秒）。
+ * 单批上限远低于 MySQL 5.7 默认 max_allowed_packet（4MB）。
+ */
+const MAX_BATCH_BYTES = 1024 * 1024
+
+/**
+ * 把已切分的语句重新组合为多语句批次。分隔符前加换行，防止语句末尾残留的
+ * `#` 行注释吞掉分号；DELIMITER 定义的存储过程体由服务端解析器按复合语句处理。
+ */
+export function batchMysqlStatements(sqls: string[], maxBytes = MAX_BATCH_BYTES): string[][] {
+  const batches: string[][] = []
+  let current: string[] = []
+  let size = 0
+  for (const sql of sqls) {
+    const bytes = Buffer.byteLength(sql) + 3
+    if (current.length && size + bytes > maxBytes) {
+      batches.push(current)
+      current = []
+      size = 0
+    }
+    current.push(sql)
+    size += bytes
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
 /** 反引号包裹标识符 */
 function quoteIdent(name: string): string {
   return '`' + name.replace(/`/g, '``') + '`'
@@ -30,6 +60,7 @@ function quoteIdent(name: string): string {
 export class MysqlDriver implements DbDriver {
   readonly capabilities = capabilitiesForType('mysql')
   private conn: mysql.Connection | null = null
+  private interrupts = new WeakMap<mysql.Connection, (error: Error) => void>()
 
   constructor(
     private cfg: {
@@ -58,13 +89,29 @@ export class MysqlDriver implements DbDriver {
   }
 
   private instrument(connection: mysql.Connection): mysql.Connection {
-    const mutable = connection as unknown as {
-      query: (...args: unknown[]) => Promise<unknown>
-      execute: (...args: unknown[]) => Promise<unknown>
+    const mutable = connection as unknown as Record<
+      'query' | 'execute' | 'beginTransaction' | 'commit' | 'rollback' | 'end',
+      (...args: unknown[]) => Promise<unknown>
+    >
+    // mysql2 在 end()/destroy() 后会把连接标记为 closing；此后底层流被关闭（例如 SSH
+    // 隧道随取消一起关闭）时，它不会再回调任何在途命令，导致 Promise 永远挂起、
+    // 执行界面一直转圈且没有审计结果。这里为每条连接维护一个中断信号，取消、
+    // 断开或传输层关闭时让所有在途和后续调用立即失败。
+    let interrupt!: (error: Error) => void
+    const interrupted = new Promise<never>((_, reject) => { interrupt = reject })
+    interrupted.catch(() => {})
+    this.interrupts.set(connection, interrupt)
+    const core = (connection as unknown as { connection?: { stream?: { once?: (event: string, listener: () => void) => void } } }).connection
+    core?.stream?.once?.('close', () => interrupt(new Error(CONNECTION_CLOSED_MESSAGE)))
+    const guard = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise, interrupted])
+
+    for (const method of ['beginTransaction', 'commit', 'rollback', 'end'] as const) {
+      const original = mutable[method].bind(connection)
+      mutable[method] = (...args: unknown[]) => guard(original(...args))
     }
     for (const method of ['query', 'execute'] as const) {
       const original = mutable[method].bind(connection)
-      mutable[method] = (...args: unknown[]) => {
+      mutable[method] = (...args: unknown[]) => guard((() => {
         const source = args[0]
         const statement = typeof source === 'string'
           ? source
@@ -83,7 +130,7 @@ export class MysqlDriver implements DbDriver {
           }
           return {}
         })
-      }
+      })())
     }
     return connection
   }
@@ -110,16 +157,21 @@ export class MysqlDriver implements DbDriver {
     this.conn = null
     if (!connection) return
     if (connection.state === 'authenticated' || connection.state === 'connected') {
+      // end() 会等在途命令完成后再 QUIT；若传输层先断开，instrument 中的中断信号会让它结束。
       await connection.end().catch(() => {})
     } else {
       connection.destroy()
     }
+    this.interrupts.get(connection)?.(new Error(CONNECTION_CLOSED_MESSAGE))
   }
 
   async cancel(): Promise<void> {
     const connection = this.conn
     this.conn = null
-    connection?.destroy()
+    if (!connection) return
+    // 先让在途调用立即失败，再关闭连接；mysql2 不会为已 destroy 的连接回调在途命令。
+    this.interrupts.get(connection)?.(new Error(QUERY_CANCELED_MESSAGE))
+    connection.destroy()
   }
 
   async test(): Promise<void> {
@@ -424,9 +476,16 @@ export class MysqlDriver implements DbDriver {
     await conn.beginTransaction()
     try {
       const results: QueryResult[] = []
-      for (const s of sqls) {
-        const [raw, fields] = await conn.query(normalizeMysqlSessionVariables(s))
-        results.push(...this.normalize(raw, fields))
+      for (const batch of batchMysqlStatements(sqls)) {
+        const [raw, fields] = await conn.query(normalizeMysqlSessionVariables(batch.join('\n;\n')))
+        if (batch.length === 1) {
+          results.push(...this.normalize(raw, fields))
+        } else {
+          // 多语句结果与语句一一对应（CALL 会额外返回结果集），不能依赖单语句启发式判断。
+          const items = Array.isArray(raw) ? raw : [raw]
+          const fieldArr = Array.isArray(fields) ? fields : []
+          results.push(...items.map((item, i) => this.singleResult(item, fieldArr[i])))
+        }
       }
       await conn.commit()
       return results
