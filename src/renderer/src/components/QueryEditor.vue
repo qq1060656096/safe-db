@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AppstoreOutlined, CaretRightOutlined, ClearOutlined, CopyOutlined, DatabaseOutlined, FormatPainterOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@vicons/antd'
-import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NTabPane, NTabs, NTooltip, useDialog, useMessage, type SelectOption } from 'naive-ui'
+import { NAlert, NButton, NCard, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NSwitch, NTabPane, NTabs, NTooltip, useDialog, useMessage, type SelectOption } from 'naive-ui'
 import { format as formatSql, type SqlLanguage } from 'sql-formatter'
 import { useI18n } from 'vue-i18n'
 import type { ConnectionMeta, DbType, ExecuteResponse, SavedQueryInput } from '../../../shared/types'
@@ -68,6 +68,30 @@ const displayedResponse = computed(() => response.value?.status === 'ok' ? respo
 const displayedSql = computed(() => response.value?.status === 'ok' ? executedSql.value : lastSuccessfulSql.value)
 const resultRowCount = computed(() => displayedResponse.value?.results?.reduce((count, result) => count + (result.rows?.length ?? 0), 0) ?? 0)
 const hasRowResult = computed(() => displayedResponse.value?.results?.some((result) => result.kind === 'rows') ?? false)
+/** 结果数超过该值时显示跳转工具，并默认只列出返回结果集的语句（脚本里大量 SET/INSERT 只产生影响行数）。 */
+const MANY_RESULTS = 10
+const onlyRowResults = ref(false)
+const resultCount = computed(() => displayedResponse.value?.results?.length ?? 0)
+const rowResultCount = computed(() => displayedResponse.value?.results?.filter((result) => result.kind === 'rows').length ?? 0)
+const visibleResults = computed(() => (displayedResponse.value?.results ?? [])
+  .map((result, index) => ({ result, index }))
+  .filter(({ result }) => !onlyRowResults.value || result.kind === 'rows'))
+const resultJumpOptions = computed<SelectOption[]>(() => visibleResults.value.map(({ result, index }) => ({
+  value: index,
+  label: result.kind === 'rows'
+    ? t('query.resultTabRows', { index: index + 1, count: result.rows?.length ?? 0 })
+    : t('query.resultTabAffected', { index: index + 1, count: result.affectedRows ?? 0 })
+})))
+watch(displayedResponse, (current, previous) => {
+  if (current !== previous) onlyRowResults.value = resultCount.value > MANY_RESULTS && rowResultCount.value > 0
+})
+watch(visibleResults, (visible) => {
+  if (visible.length && !visible.some(({ index }) => index === activeResultIndex.value)) activeResultIndex.value = visible[0].index
+})
+function jumpToLastResult(): void {
+  const last = visibleResults.value.at(-1)
+  if (last) activeResultIndex.value = last.index
+}
 const errorLine = computed(() => {
   const error = response.value?.status === 'error' ? response.value.error ?? '' : ''
   const match = /(?:at|on)\s+line\s+(\d+)/i.exec(error) ?? /第\s*(\d+)\s*行/.exec(error)
@@ -620,7 +644,22 @@ defineExpose({ saveForClose })
       <div v-if="response?.status === 'error' && displayedResponse" class="query-last-result-hint">{{ t('query.showingLastSuccessfulResult') }}</div>
       <template v-if="displayedResponse?.status === 'ok'">
         <NTabs v-if="displayedResponse.results?.length" v-model:value="activeResultIndex" type="line" size="small" class="query-result-tabs">
-          <NTabPane v-for="(result, index) in displayedResponse.results" :key="index" :name="index" display-directive="show:lazy">
+          <template v-if="resultCount > MANY_RESULTS" #suffix>
+            <div class="query-result-jump">
+              <NTooltip>
+                <template #trigger>
+                  <label class="query-result-filter">
+                    <NSwitch v-model:value="onlyRowResults" size="small" :disabled="!rowResultCount" />
+                    <span>{{ t('query.onlyRowResults', { count: rowResultCount }) }}</span>
+                  </label>
+                </template>
+                {{ t('query.onlyRowResultsHelp', { total: resultCount }) }}
+              </NTooltip>
+              <NSelect v-model:value="activeResultIndex" :options="resultJumpOptions" filterable size="small" class="query-result-select" :placeholder="t('query.jumpToResult')" />
+              <NButton size="small" @click="jumpToLastResult">{{ t('query.lastResult') }}</NButton>
+            </div>
+          </template>
+          <NTabPane v-for="{ result, index } in visibleResults" :key="index" :name="index" display-directive="show:lazy">
             <template #tab>{{ result.kind === 'rows' ? t('query.resultTabRows', { index: index + 1, count: result.rows?.length ?? 0 }) : t('query.resultTab', { index: index + 1 }) }}</template>
             <QueryResultView
               :result="result"

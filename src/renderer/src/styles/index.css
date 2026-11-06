@@ -114,6 +114,15 @@ body.query-resizing, body.query-resizing * { cursor: row-resize !important; user
 .query-results { flex: 1; min-height: 0; overflow: hidden; padding-top: 8px; display: flex; flex-direction: column; }
 .query-result-tabs { flex: 1; min-height: 0; }
 .query-result-tabs > .n-tabs-nav { flex: 0 0 auto; padding: 0 12px; }
+/* naive-ui 默认隐藏标签栏横向滚动条；结果很多时需要可见、可拖动的滚动条。
+   Chromium 121+ 中 scrollbar-width 非 auto 时会忽略 ::-webkit-scrollbar 样式，因此必须恢复为 auto。 */
+.query-result-tabs .n-tabs-nav-scroll-wrapper .v-x-scroll { scrollbar-width: auto; }
+.query-result-tabs .n-tabs-nav-scroll-wrapper .v-x-scroll::-webkit-scrollbar { display: block; height: 6px; }
+.query-result-tabs .n-tabs-nav-scroll-wrapper .v-x-scroll::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.25); border-radius: 3px; }
+.query-result-tabs .n-tabs-nav-scroll-wrapper .v-x-scroll::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.4); }
+.query-result-jump { display: flex; align-items: center; gap: 8px; padding-left: 12px; }
+.query-result-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; white-space: nowrap; cursor: pointer; }
+.query-result-select { width: 190px; }
 .query-result-tabs > .n-tab-pane, .query-result-tabs > .n-tabs-pane-wrapper { flex: 1; min-height: 0; }
 .query-result-tabs > .n-tab-pane, .query-result-tabs > .n-tabs-pane-wrapper > .n-tab-pane { height: 100%; overflow: hidden; }
 .query-result { height: 100%; min-height: 0; padding: 0 12px 10px; display: flex; flex-direction: column; overflow: hidden; }
