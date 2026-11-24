@@ -248,6 +248,16 @@ export const useAppStore = defineStore('app', {
     setActiveTab(id: string): void {
       if (this.tabs.some((tab) => tab.id === id)) this.activeTabId = id
     },
+    moveTab(id: string, toIndex: number): void {
+      const from = this.tabs.findIndex((tab) => tab.id === id)
+      if (from < 0) return
+      const target = Math.min(Math.max(0, toIndex), this.tabs.length - 1)
+      if (from === target) return
+      const next = [...this.tabs]
+      const [moved] = next.splice(from, 1)
+      next.splice(target, 0, moved)
+      this.tabs = next
+    },
     setObjectSelection(id: string, selection?: ObjectSelection): void {
       const tab = this.tabs.find((item) => item.id === id)
       if (!tab || tab.type !== 'objects') return

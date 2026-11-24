@@ -55,6 +55,8 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 .workspace-tabs > .n-tabs-nav { flex: 0 0 auto; margin-bottom: 0; }
 .workspace-tabs > .n-tab-pane, .workspace-tabs > .n-tabs-pane-wrapper { flex: 1; min-height: 0; }
 .workspace-tabs .n-tabs-pane-wrapper, .workspace-tabs .n-tab-pane { height: 100%; overflow: hidden; }
+.workspace-tabs > .n-tabs-nav .n-tabs-tab.is-dragging { opacity: 0.6; }
+body.workspace-tab-dragging, body.workspace-tab-dragging * { cursor: grabbing !important; user-select: none !important; }
 .workspace-tab-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; white-space: nowrap; }
 .workspace-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .workspace-tab-kind { width: 7px; height: 7px; flex: 0 0 auto; border: 1px solid #9ba1a8; transform: rotate(45deg); }

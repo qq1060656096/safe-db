@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { SwitcherOutlined } from '@vicons/antd'
 import { NButton, NCard, NDropdown, NEmpty, NIcon, NModal, NSpace, NTabPane, NTabs, NTooltip, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -249,6 +249,7 @@ onBeforeUnmount(() => {
   stopMetadataChangedListener?.()
   stopMetadataChangedListener = null
   stopResize()
+  endTabDrag()
   window.removeEventListener('resize', handleWindowResize)
 })
 watch(() => route.params.tabId, (tabId) => {
@@ -259,6 +260,117 @@ watch(() => store.activeTabId, (tabId) => {
   if (route.path !== target) void router.replace(target)
 })
 watch(() => layoutStore.revision, () => applyWorkspaceLayout(currentWindowMode.value))
+watch([() => store.activeTabId, () => store.tabs.length], () => { void nextTick(() => revealActiveTab()) }, { flush: 'post' })
+
+const workspaceTabsRef = ref<{ $el?: HTMLElement } | null>(null)
+function tabScroller(): HTMLElement | null {
+  return workspaceTabsRef.value?.$el?.querySelector<HTMLElement>(':scope > .n-tabs-nav .v-x-scroll') ?? null
+}
+function tabElement(id: string): HTMLElement | null {
+  const root = workspaceTabsRef.value?.$el
+  if (!root) return null
+  return Array.from(root.querySelectorAll<HTMLElement>(':scope > .n-tabs-nav .n-tabs-tab[data-name]')).find((el) => el.dataset.name === id) ?? null
+}
+/** Scroll the tab bar so the tab of the pane currently shown is fully visible. */
+function revealActiveTab(behavior: ScrollBehavior = 'smooth'): void {
+  const id = store.activeTabId
+  const scroller = tabScroller()
+  const el = id ? tabElement(id) : null
+  if (!scroller || !el) return
+  const bounds = scroller.getBoundingClientRect()
+  const rect = el.getBoundingClientRect()
+  const margin = 24
+  if (rect.left < bounds.left) scroller.scrollBy({ left: rect.left - bounds.left - margin, behavior })
+  else if (rect.right > bounds.right) scroller.scrollBy({ left: rect.right - bounds.right + margin, behavior })
+}
+
+const TAB_DRAG_THRESHOLD = 5
+const TAB_EDGE_SCROLL_ZONE = 40
+let tabDrag: { id: string; pointerId: number; startX: number; lastX: number; active: boolean; layoutPending: boolean } | null = null
+let tabDragFrame = 0
+function onWorkspaceTabsPointerDown(event: PointerEvent): void {
+  const target = event.target as HTMLElement | null
+  if (!target) return
+  const nav = target.closest('.n-tabs-nav')
+  if (!nav || nav.parentElement !== workspaceTabsRef.value?.$el) {
+    // Interacting with the pane: make sure its tab is visible in the bar.
+    revealActiveTab()
+    return
+  }
+  if (event.button !== 0 || target.closest('.n-base-close')) return
+  const id = target.closest<HTMLElement>('.n-tabs-tab[data-name]')?.dataset.name
+  if (!id) return
+  tabDrag = { id, pointerId: event.pointerId, startX: event.clientX, lastX: event.clientX, active: false, layoutPending: false }
+  window.addEventListener('pointermove', onTabDragMove)
+  window.addEventListener('pointerup', endTabDrag)
+  window.addEventListener('pointercancel', endTabDrag)
+}
+function onTabDragMove(event: PointerEvent): void {
+  if (!tabDrag || event.pointerId !== tabDrag.pointerId) return
+  tabDrag.lastX = event.clientX
+  if (!tabDrag.active) {
+    if (Math.abs(event.clientX - tabDrag.startX) < TAB_DRAG_THRESHOLD) return
+    tabDrag.active = true
+    document.body.classList.add('workspace-tab-dragging')
+    tabElement(tabDrag.id)?.classList.add('is-dragging')
+    tabDragFrame = requestAnimationFrame(tabDragTick)
+  }
+  event.preventDefault()
+  reorderDraggedTab(event.clientX)
+}
+function tabDragTick(): void {
+  if (!tabDrag?.active) return
+  const scroller = tabScroller()
+  if (scroller) {
+    const bounds = scroller.getBoundingClientRect()
+    let delta = 0
+    if (tabDrag.lastX < bounds.left + TAB_EDGE_SCROLL_ZONE) delta = -Math.ceil((bounds.left + TAB_EDGE_SCROLL_ZONE - tabDrag.lastX) / 4)
+    else if (tabDrag.lastX > bounds.right - TAB_EDGE_SCROLL_ZONE) delta = Math.ceil((tabDrag.lastX - bounds.right + TAB_EDGE_SCROLL_ZONE) / 4)
+    if (delta) {
+      scroller.scrollLeft += delta
+      reorderDraggedTab(tabDrag.lastX)
+    }
+  }
+  tabDragFrame = requestAnimationFrame(tabDragTick)
+}
+function reorderDraggedTab(x: number): void {
+  const drag = tabDrag
+  if (!drag?.active || drag.layoutPending) return
+  const from = store.tabs.findIndex((tab) => tab.id === drag.id)
+  const draggedEl = tabElement(drag.id)
+  if (from < 0 || !draggedEl) return
+  const width = draggedEl.getBoundingClientRect().width
+  let to = from
+  for (let index = 0; index < store.tabs.length; index++) {
+    const el = tabElement(store.tabs[index].id)
+    if (!el) continue
+    const rect = el.getBoundingClientRect()
+    const overTarget = x >= rect.left && x <= rect.right
+    const beyondEnd = index === store.tabs.length - 1 && x > rect.right
+    const beforeStart = index === 0 && x < rect.left
+    if (!overTarget && !beyondEnd && !beforeStart) continue
+    // Only swap once the pointer would land on the dragged tab after the move, so tabs of different widths don't flicker back and forth.
+    if (index < from && (beforeStart || x < rect.left + width)) to = index
+    else if (index > from && (beyondEnd || x > rect.right - width)) to = index
+    break
+  }
+  if (to === from) return
+  store.moveTab(drag.id, to)
+  drag.layoutPending = true
+  void nextTick(() => { if (tabDrag === drag) drag.layoutPending = false })
+}
+function endTabDrag(event?: PointerEvent): void {
+  if (event && tabDrag && event.pointerId !== tabDrag.pointerId) return
+  window.removeEventListener('pointermove', onTabDragMove)
+  window.removeEventListener('pointerup', endTabDrag)
+  window.removeEventListener('pointercancel', endTabDrag)
+  cancelAnimationFrame(tabDragFrame)
+  const wasActive = tabDrag?.active
+  if (tabDrag) tabElement(tabDrag.id)?.classList.remove('is-dragging')
+  document.body.classList.remove('workspace-tab-dragging')
+  tabDrag = null
+  if (wasActive) void nextTick(() => revealActiveTab())
+}
 function setQueryEditorRef(tabId: string, instance: unknown): void {
   if (instance) queryEditorRefs.set(tabId, instance as QueryEditorHandle)
   else queryEditorRefs.delete(tabId)
@@ -404,12 +516,14 @@ function closeOverlayPanels(): void {
       </div>
       <NTabs
         v-else
+        ref="workspaceTabsRef"
         type="card"
         closable
         :value="store.activeTabId ?? undefined"
         class="workspace-tabs"
         @update:value="(id) => store.setActiveTab(String(id))"
         @close="(id) => closeTab(String(id))"
+        @pointerdown.capture="onWorkspaceTabsPointerDown"
       >
         <NTabPane v-for="tab in store.tabs" :key="tab.id" :name="tab.id" display-directive="show">
           <template #tab>
