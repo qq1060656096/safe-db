@@ -13,6 +13,7 @@ import type {
 import {
   buildWhereClause,
   sanitizeRows,
+  rowsResultFromArrays,
   type DbDriver,
   type DriverOperationResult,
   type TableDataQuery,
@@ -406,7 +407,11 @@ export class MysqlDriver implements DbDriver {
     }
   }
 
-  /** mysql2 结果归一化:单语句返回 rows[] 或 ResultSetHeader;多语句返回两者混合的数组 */
+  /**
+   * mysql2 结果归一化(查询以 rowsAsArray 执行):单语句返回 rows[][] 或 ResultSetHeader;
+   * 多语句返回两者混合的数组。数组行模式下单语句 SELECT 的 raw[0] 也是数组,
+   * 因此用 fields 区分:单语句 fields 是 FieldPacket[],多语句是 (FieldPacket[] | undefined)[]。
+   */
   private normalize(raw: unknown, fields: unknown): QueryResult[] {
     const isResultHeader = (v: unknown): boolean =>
       typeof v === 'object' &&
@@ -415,24 +420,24 @@ export class MysqlDriver implements DbDriver {
       'affectedRows' in v &&
       'insertId' in v
 
-    // 多语句:raw 的每个元素是 rows[] 或 ResultSetHeader,fields 同位对应
-    if (
-      Array.isArray(raw) &&
-      raw.length > 0 &&
-      (Array.isArray(raw[0]) || isResultHeader(raw[0]))
-    ) {
+    const multi = Array.isArray(raw) && raw.length > 0 && (
+      isResultHeader(raw[0]) ||
+      (Array.isArray(fields) && fields.length > 0 && (Array.isArray(fields[0]) || fields[0] === undefined || fields[0] === null))
+    )
+    if (multi) {
+      const items = raw as unknown[]
       const fieldArr = Array.isArray(fields) ? fields : []
-      return raw.map((item, i) => this.singleResult(item, fieldArr[i]))
+      return items.map((item, i) => this.singleResult(item, fieldArr[i]))
     }
     return [this.singleResult(raw, fields)]
   }
 
   private singleResult(raw: unknown, fields: unknown): QueryResult {
     if (Array.isArray(raw)) {
-      const cols = Array.isArray(fields)
-        ? (fields as { name?: string }[]).map((f) => ({ name: f?.name ?? '' }))
+      const names = Array.isArray(fields)
+        ? (fields as { name?: string }[]).map((f) => f?.name ?? '')
         : []
-      return { kind: 'rows', columns: cols, rows: sanitizeRows(raw as Record<string, unknown>[]) }
+      return rowsResultFromArrays(names, raw as unknown[][])
     }
     const info = raw as { affectedRows?: number } | null | undefined
     return { kind: 'exec', affectedRows: info?.affectedRows ?? 0 }
@@ -466,7 +471,7 @@ export class MysqlDriver implements DbDriver {
   async run(sql: string, database?: string): Promise<QueryResult[]> {
     const conn = this.requireConn()
     if (database) await conn.query(`USE ${quoteIdent(database)}`)
-    const [raw, fields] = await conn.query(normalizeMysqlSessionVariables(sql))
+    const [raw, fields] = await conn.query({ sql: normalizeMysqlSessionVariables(sql), rowsAsArray: true })
     return this.normalize(raw, fields)
   }
 
@@ -477,7 +482,7 @@ export class MysqlDriver implements DbDriver {
     try {
       const results: QueryResult[] = []
       for (const batch of batchMysqlStatements(sqls)) {
-        const [raw, fields] = await conn.query(normalizeMysqlSessionVariables(batch.join('\n;\n')))
+        const [raw, fields] = await conn.query({ sql: normalizeMysqlSessionVariables(batch.join('\n;\n')), rowsAsArray: true })
         if (batch.length === 1) {
           results.push(...this.normalize(raw, fields))
         } else {

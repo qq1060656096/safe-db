@@ -76,6 +76,40 @@ export function sanitizeRows(rows: Record<string, unknown>[]): Record<string, un
   })
 }
 
+/**
+ * 结果集列名去重：`SELECT *, real_number` 这类查询会出现同名列，按列名做 key 时后者会覆盖前者，
+ * 网格里只剩一列。重复的列名依次改为 `name(1)`、`name(2)`…，并避开已存在的同名列。
+ */
+export function uniqueColumnNames(names: string[]): string[] {
+  const used = new Set(names)
+  const seen = new Set<string>()
+  return names.map((name) => {
+    if (!seen.has(name)) {
+      seen.add(name)
+      return name
+    }
+    let index = 1
+    while (used.has(`${name}(${index})`)) index++
+    const unique = `${name}(${index})`
+    used.add(unique)
+    return unique
+  })
+}
+
+/** 由列名和按列序排列的行值（驱动的数组行模式）构造结果集，保证同名列都能显示。 */
+export function rowsResultFromArrays(names: string[], rows: unknown[][]): QueryResult {
+  const keys = uniqueColumnNames(names)
+  return {
+    kind: 'rows',
+    columns: keys.map((name) => ({ name })),
+    rows: rows.map((row) => {
+      const out: Record<string, unknown> = {}
+      keys.forEach((key, i) => { out[key] = sanitizeValue(row[i]) })
+      return out
+    })
+  }
+}
+
 const FILTER_OPS = new Set(['=', '!=', '>', '>=', '<', '<='])
 
 /**

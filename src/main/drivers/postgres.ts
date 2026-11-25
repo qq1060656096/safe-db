@@ -12,6 +12,7 @@ import type {
 import {
   buildWhereClause,
   sanitizeRows,
+  rowsResultFromArrays,
   type DbDriver,
   type DriverOperationResult,
   type TableDataQuery,
@@ -411,11 +412,7 @@ export class PostgresDriver implements DbDriver {
     const arr = Array.isArray(raw) ? raw : [raw]
     return arr.map((r) => {
       if (r.command === 'SELECT' || (r.fields && r.fields.length > 0)) {
-        return {
-          kind: 'rows',
-          columns: r.fields.map((f) => ({ name: f.name })),
-          rows: sanitizeRows(r.rows)
-        } as QueryResult
+        return rowsResultFromArrays(r.fields.map((f) => f.name), r.rows as unknown[][])
       }
       return { kind: 'exec', affectedRows: r.rowCount ?? 0 } as QueryResult
     })
@@ -463,8 +460,8 @@ export class PostgresDriver implements DbDriver {
 
   async run(sql: string, database?: string): Promise<QueryResult[]> {
     const client = await this.clientFor(database)
-    const res = await client.query(sql)
-    return this.toResults(res)
+    const res = await client.query({ text: sql, rowMode: 'array' })
+    return this.toResults(res as unknown as pg.QueryResult | pg.QueryResult[])
   }
 
   async runInTransaction(sqls: string[], database?: string): Promise<QueryResult[]> {
@@ -473,8 +470,8 @@ export class PostgresDriver implements DbDriver {
     try {
       const results: QueryResult[] = []
       for (const s of sqls) {
-        const res = await client.query(s)
-        results.push(...this.toResults(res))
+        const res = await client.query({ text: s, rowMode: 'array' })
+        results.push(...this.toResults(res as unknown as pg.QueryResult | pg.QueryResult[]))
       }
       await client.query('COMMIT')
       return results

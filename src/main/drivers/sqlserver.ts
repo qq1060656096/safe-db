@@ -12,6 +12,7 @@ import type {
 import {
   buildWhereClause,
   sanitizeRows,
+  rowsResultFromArrays,
   type DbDriver,
   type DriverOperationResult,
   type TableDataQuery,
@@ -428,13 +429,9 @@ export class SqlServerDriver implements DbDriver {
   private toResults(output: QueryOutput): QueryResult[] {
     const results: QueryResult[] = []
     for (const recordset of output.recordsets ?? []) {
-      const rows = recordset as Record<string, unknown>[]
-      const metadata = (recordset as unknown as { columns?: Record<string, unknown> }).columns
-      results.push({
-        kind: 'rows',
-        columns: Object.keys(metadata ?? rows[0] ?? {}).map((name) => ({ name })),
-        rows: sanitizeRows(rows)
-      })
+      // 以 arrayRowMode 执行：行是按列序的数组，columns 是元数据数组，同名列不会被合并成数组值。
+      const metadata = (recordset as unknown as { columns?: { name: string }[] }).columns ?? []
+      results.push(rowsResultFromArrays(metadata.map((column) => column.name), recordset as unknown as unknown[][]))
     }
     const affectedRows = (output.rowsAffected ?? []).reduce((sum, count) => sum + count, 0)
     if (results.length === 0) results.push({ kind: 'exec', affectedRows })
@@ -536,6 +533,7 @@ export class SqlServerDriver implements DbDriver {
   async run(command: string, database?: string): Promise<QueryResult[]> {
     const request = (await this.poolFor(database)).request()
     request.multiple = true
+    request.arrayRowMode = true
     return this.toResults(await this.runRequest(request, command))
   }
 
@@ -547,6 +545,7 @@ export class SqlServerDriver implements DbDriver {
       for (const command of commands) {
         const request = new sql.Request(transaction)
         request.multiple = true
+        request.arrayRowMode = true
         results.push(...this.toResults(await this.runRequest(request, command)))
       }
       await transaction.commit()

@@ -10,7 +10,7 @@ import type {
   RoutineInfo,
   TableInfo
 } from '../../shared/types'
-import { sanitizeRows, buildWhereClause, type DbDriver, type DriverOperationResult, type TableDataQuery, type TableDataResult } from './base'
+import { sanitizeRows, rowsResultFromArrays, buildWhereClause, type DbDriver, type DriverOperationResult, type TableDataQuery, type TableDataResult } from './base'
 import { splitSqlStatements } from '../core/sqlSplit'
 import { capabilitiesForType } from './capabilities'
 import { compileRelationalOperation } from './relationalOperation'
@@ -374,9 +374,8 @@ export class SqliteDriver implements DbDriver {
     for (const s of stmts) {
       const stmt = d.prepare(s)
       if (stmt.reader) {
-        const rows = stmt.all() as Record<string, unknown>[]
-        const columns = stmt.columns().map((c) => ({ name: c.name }))
-        results.push({ kind: 'rows', columns, rows: sanitizeRows(rows) })
+        const columns = stmt.columns().map((c) => c.name)
+        results.push(rowsResultFromArrays(columns, stmt.raw(true).all() as unknown[][]))
       } else {
         const info = stmt.run()
         results.push({ kind: 'exec', affectedRows: info.changes })
@@ -392,12 +391,8 @@ export class SqliteDriver implements DbDriver {
       for (const s of sqls) {
         const stmt = d.prepare(s)
         if (stmt.reader) {
-          const rows = stmt.all() as Record<string, unknown>[]
-          results.push({
-            kind: 'rows',
-            columns: stmt.columns().map((c) => ({ name: c.name })),
-            rows: sanitizeRows(rows)
-          })
+          const columns = stmt.columns().map((c) => c.name)
+          results.push(rowsResultFromArrays(columns, stmt.raw(true).all() as unknown[][]))
         } else {
           const info = stmt.run()
           results.push({ kind: 'exec', affectedRows: info.changes })
