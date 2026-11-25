@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { AppstoreOutlined, ClearOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, DisconnectOutlined, EditOutlined, ExportOutlined, EyeOutlined, FolderOutlined, FunctionOutlined, HistoryOutlined, HolderOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, TableOutlined, UndoOutlined, UnlockOutlined } from '@vicons/antd'
 import { NButton, NCard, NCheckbox, NDropdown, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NTag, NTooltip, NTree, useDialog, useMessage, type DropdownOption, type TreeOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -7,6 +7,7 @@ import type { ConnectionMeta, DatabaseExportMode, DatabaseOperation, PermissionM
 import { isSystemDatabase } from '../../../shared/databasePolicy'
 import { useContextMenuDismiss } from '../contextMenu'
 import { isAppLocale, localeOptions } from '../i18n'
+import type { AppTab } from '../stores/app'
 import { invalidateConnectionMetadata, loadColumnMetadata, loadDatabaseMetadata, loadTableMetadata } from '../metadataCache'
 import { loadObjectDefinition, openObjectDefinitionTab, type ObjectDefinitionTarget } from '../objectDefinition'
 import { useAppStore } from '../stores/app'
@@ -39,6 +40,7 @@ const treeData = ref<DbTreeNode[]>([])
 const search = ref('')
 const expandedKeys = ref<TreeKey[]>([])
 const selectedKeys = ref<TreeKey[]>([])
+const treeContainer = ref<HTMLElement | null>(null)
 const dialogOpen = ref(false)
 const editing = ref<ConnectionMeta | null>(null)
 const exportConnection = ref<ConnectionMeta | null>(null)
@@ -417,6 +419,64 @@ function selectTreeNode(keys: TreeKey[]): void {
   const node = keys.length ? findNode(keys[keys.length - 1]) : undefined
   if (node?.data.kind === 'objectGroup' || node?.data.kind === 'savedQueryGroup') openObjectList(node.data)
 }
+/** 返回从根到目标节点的 key 路径（含目标本身）。 */
+function pathToNode(key: TreeKey, nodes: DbTreeNode[] = treeData.value): TreeKey[] | undefined {
+  for (const node of nodes) {
+    if (node.key === key) return [key]
+    const rest = node.children ? pathToNode(key, node.children) : undefined
+    if (rest) return [node.key!, ...rest]
+  }
+  return undefined
+}
+let revealRequest = 0
+/**
+ * 在左侧树中定位当前标签所属的连接、数据库（及 schema / 表），只展开不折叠，
+ * 并选中、滚动到最具体的那一层。启动恢复标签和切换标签时都会触发。
+ */
+async function revealTab(tab: AppTab | undefined): Promise<void> {
+  const request = ++revealRequest
+  const connectionId = tab?.connectionId
+  if (!tab || !connectionId || !connectionOf(connectionId)) return
+  const connKey = connectionKey(connectionId)
+  if (!expandedKeys.value.includes(connKey) || !store.connectedIds[connectionId]) await openConnection(connectionId)
+  if (request !== revealRequest || !store.connectedIds[connectionId]) return
+
+  const keys: TreeKey[] = [connKey]
+  let target: TreeKey = connKey
+  if (tab.database !== undefined) {
+    const dbKey = databaseKey(connectionId, tab.database)
+    const dbNode = findNode(dbKey)
+    if (dbNode) {
+      if (dbNode.children === undefined) await loadNode(dbNode)
+      if (request !== revealRequest) return
+      keys.push(dbKey)
+      target = dbKey
+      const schemaKey = tab.schema ? `schema:${connectionId}:${tab.database}:${tab.schema}` : undefined
+      if (schemaKey && findNode(schemaKey)) {
+        keys.push(schemaKey)
+        target = schemaKey
+      }
+    }
+  }
+  if (tab.table && (tab.type === 'table' || tab.type === 'structure')) {
+    const tableKey = `table:${connectionId}:${tab.database}:${tab.schema ?? ''}:${tab.table}`
+    const path = pathToNode(tableKey)
+    if (path) {
+      keys.push(...path.slice(0, -1))
+      target = tableKey
+    }
+  }
+  expandedKeys.value = [...new Set([...expandedKeys.value, ...keys])]
+  selectedKeys.value = [target]
+  await nextTick()
+  if (request !== revealRequest) return
+  treeContainer.value?.querySelector('.n-tree-node--selected')?.scrollIntoView({ block: 'nearest' })
+}
+watch(
+  () => [store.activeTabId, store.connections.length] as const,
+  () => { void revealTab(store.tabs.find((tab) => tab.id === store.activeTabId)) },
+  { immediate: true }
+)
 function importRowsFromCsv(content: string, delimiter: string): Record<string, unknown>[] {
   const matrix: string[][] = []
   let row: string[] = []
@@ -1530,7 +1590,7 @@ function selectContextMenu(key: string | number): void {
       <NInput v-model:value="search" clearable size="small" :placeholder="t('sidebar.searchPlaceholder')"><template #prefix><NIcon color="#aaa"><SearchOutlined /></NIcon></template></NInput>
       <NButton quaternary size="small" :title="t('sidebar.collapseAll')" :aria-label="t('sidebar.collapseAll')" @click="collapseAll"><template #icon><NIcon><MenuFoldOutlined /></NIcon></template></NButton>
     </div>
-    <div class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" :node-props="treeNodeProps" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
+    <div ref="treeContainer" class="sidebar-tree"><NTree remote block-line :data="displayData" :expanded-keys="expandedKeys" :selected-keys="selectedKeys" :on-load="loadNode" :render-label="renderLabel" :render-prefix="renderPrefix" :node-props="treeNodeProps" @update:expanded-keys="updateExpandedKeys" @update:selected-keys="selectTreeNode" /></div>
     <NDropdown trigger="manual" placement="bottom-start" :show="contextMenuShow" :x="contextMenuX" :y="contextMenuY" :options="contextMenuOptions" @select="selectContextMenu" @clickoutside="contextMenuShow = false" />
     <ConnectionDialog :show="dialogOpen" :initial="editing" @close="closeDialog" />
     <NModal :show="!!dropDatabaseTarget" :mask-closable="!droppingDatabase" :close-on-esc="!droppingDatabase" @update:show="(show) => { if (!show) closeDropDatabase() }">
