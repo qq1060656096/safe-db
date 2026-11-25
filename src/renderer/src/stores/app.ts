@@ -37,6 +37,8 @@ export interface AppTab {
   savedQueryId?: string
   /** 查询内容与最近一次保存的版本不一致。 */
   dirty?: boolean
+  /** 编辑器中尚未保存的 SQL；退出后重新打开时用它恢复草稿。 */
+  draftSql?: string
 }
 
 export interface PendingApproval {
@@ -277,6 +279,22 @@ export const useAppStore = defineStore('app', {
       if (!tab || tab.type !== 'query' || Boolean(tab.dirty) === dirty) return
       tab.dirty = dirty || undefined
     },
+    setTabDraft(id: string, draftSql?: string): void {
+      const tab = this.tabs.find((item) => item.id === id)
+      if (!tab || tab.type !== 'query' || tab.draftSql === draftSql) return
+      tab.draftSql = draftSql
+    },
+    /** 视图/方法定义应用成功后，以编辑器内容作为新的基线。 */
+    setTabSql(id: string, sql: string): void {
+      const tab = this.tabs.find((item) => item.id === id)
+      if (!tab || tab.type !== 'query') return
+      tab.sql = sql
+      tab.draftSql = undefined
+    },
+    restoreTabs(tabs: AppTab[], activeTabId: string | null): void {
+      this.tabs = tabs
+      this.activeTabId = activeTabId && tabs.some((tab) => tab.id === activeTabId) ? activeTabId : tabs.at(-1)?.id ?? null
+    },
     bindSavedQuery(id: string, query: SavedQuery): void {
       const tab = this.tabs.find((item) => item.id === id)
       if (!tab || tab.type !== 'query') return
@@ -286,6 +304,7 @@ export const useAppStore = defineStore('app', {
       tab.database = query.database
       tab.sql = query.sql
       tab.dirty = undefined
+      tab.draftSql = undefined
       tab.schema = undefined
       tab.routine = undefined
       tab.routineType = undefined

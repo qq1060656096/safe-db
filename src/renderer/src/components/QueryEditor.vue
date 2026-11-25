@@ -29,7 +29,7 @@ const store = useAppStore()
 const { t } = useI18n()
 const dialog = useDialog()
 const message = useMessage()
-const value = ref(props.tab.sql ?? '')
+const value = ref(props.tab.draftSql ?? props.tab.sql ?? '')
 const sqlEditor = ref<SqlEditorHandle | null>(null)
 const executedSql = ref('')
 const response = ref<ExecuteResponse | null>(null)
@@ -197,6 +197,8 @@ onBeforeUnmount(() => {
 })
 
 watch(isDirty, (dirty) => store.setTabDirty(props.tab.id, dirty), { immediate: true, flush: 'sync' })
+// 未保存的内容同步到标签上，退出后重新打开可恢复草稿。
+watch([value, isDirty], ([sql, dirty]) => store.setTabDraft(props.tab.id, dirty ? sql : undefined), { immediate: true })
 
 async function refreshDatabaseOptions(clear = false): Promise<void> {
   const requestId = ++databaseOptionsRequestId
@@ -347,6 +349,7 @@ async function applyDefinition(confirmed = false): Promise<boolean> {
   const applied = await run(value.value)
   if (!applied) return false
   definitionSqlBaseline.value = value.value
+  store.setTabSql(props.tab.id, value.value)
   message.success(t('objectList.definitionApplied', { name: props.tab.table ?? props.tab.routine ?? props.tab.title }))
   return true
 }
