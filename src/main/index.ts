@@ -11,6 +11,7 @@ import { WindowStateStore, type WindowBounds } from './store/windowState'
 import { AgentServer } from './agent/server'
 import { AgentService } from './agent/service'
 import type { AgentApprovalRequest, WindowMode } from '../shared/types'
+import appIcon from '../../resources/icon.png?asset'
 
 const PRODUCT_NAME = 'safe db'
 
@@ -131,6 +132,7 @@ function createWindow(sourceWindow?: BrowserWindow): BrowserWindow {
     minHeight: MIN_WINDOW_HEIGHT,
     show: false,
     title: PRODUCT_NAME,
+    icon: appIcon,
     backgroundColor: '#1f1f1f',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -250,6 +252,8 @@ if (!gotLock) {
   void app.whenReady().then(async () => {
     // app ready 时再设置一次，避免开发模式的 Electron bundle 覆盖名称。
     app.setName(PRODUCT_NAME)
+    // 开发模式下 Dock 默认显示 Electron 图标，这里换成 safe db 自己的图标。
+    if (process.platform === 'darwin') app.dock?.setIcon(appIcon)
     windowStateStore = new WindowStateStore()
     const connections = new ConnectionStore()
     const queries = new QueryStore()

@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeF
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 
 const PRODUCT_NAME = 'safe db'
 const BUNDLE_ID = 'dev.safe-db.app'
@@ -30,11 +31,13 @@ function prepareMacRuntime() {
   const targetApp = join(cacheDir, `${PRODUCT_NAME}.app`)
   const targetExecutable = join(targetApp, 'Contents', 'MacOS', PRODUCT_NAME)
   const markerFile = join(cacheDir, 'runtime.json')
+  const iconFile = join(root, 'build', 'icon.icns')
+  const iconHash = existsSync(iconFile) ? createHash('sha256').update(readFileSync(iconFile)).digest('hex') : null
 
   if (existsSync(targetExecutable) && existsSync(markerFile)) {
     try {
       const marker = JSON.parse(readFileSync(markerFile, 'utf8'))
-      if (marker.electronVersion === electronVersion && marker.productName === PRODUCT_NAME) {
+      if (marker.electronVersion === electronVersion && marker.productName === PRODUCT_NAME && marker.iconHash === iconHash) {
         return targetExecutable
       }
     } catch {
@@ -57,9 +60,12 @@ function prepareMacRuntime() {
   run(plistBuddy, ['-c', `Set :CFBundleExecutable ${PRODUCT_NAME}`, plist])
   run(plistBuddy, ['-c', `Set :CFBundleIdentifier ${BUNDLE_ID}`, plist])
 
+  // 用 safe db 自己的图标替换 Electron 默认图标，Finder 与 Dock 里显示的就是 bundle 图标。
+  if (iconHash) cpSync(iconFile, join(contents, 'Resources', 'electron.icns'))
+
   // 修改 bundle 后使用本地临时签名，避免 macOS 拒绝启动被修改的 Electron.app。
   run('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', targetApp])
-  writeFileSync(markerFile, JSON.stringify({ electronVersion, productName: PRODUCT_NAME }, null, 2))
+  writeFileSync(markerFile, JSON.stringify({ electronVersion, productName: PRODUCT_NAME, iconHash }, null, 2))
   return targetExecutable
 }
 
